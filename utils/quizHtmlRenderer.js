@@ -4,6 +4,9 @@
 // interactive-quiz HTML on every read so template fixes propagate to
 // existing assignments (see assignments.js's normalise()).
 
+const fs   = require('fs');
+const path = require('path');
+
 function solveVerticalMath(vm) {
   if (!vm || !vm.top || !vm.bottom) return { solvable: false };
   const op = vm.operator === '+' ? '+' : '-';
@@ -175,6 +178,347 @@ function stripImagesForStructuredTasks(quiz) {
       q._sharedImage = false;
     }
   }
+}
+
+// The following 7 functions (solveVerticalMathFast through normalizeCharts)
+// were called by renderQuizHTML but never actually copied over during the
+// extraction from ai-mentor/server/routes/quiz.js — renderQuizHTML and
+// solveVerticalMath threw a ReferenceError on every real call as a result
+// (silently caught by assignments.js's normalise(), which falls back to the
+// frozen stored HTML snapshot). Ported verbatim from the original file.
+
+// Fast path: solves a column only when exactly one of its three digits is
+// unknown, using the same carry/borrow procedure a student would follow —
+// this also produces the human-readable step-by-step narrative.
+function solveVerticalMathFast(top, bottom, result, hadResult, op, width) {
+  const blanks = [];
+  const steps = [];
+  let carry = 0; // carry (addition) or borrow (subtraction) into the next (leftward) column
+  for (let i = width - 1; i >= 0; i--) {
+    const t = top[i], b = bottom[i], r = result[i];
+    const tKnown = t !== '_' && t !== undefined, bKnown = b !== '_' && b !== undefined, rKnown = r !== '_' && r !== undefined && hadResult;
+    const unknownCount = (tKnown ? 0 : 1) + (bKnown ? 0 : 1) + (hadResult ? (rKnown ? 0 : 1) : 0);
+    const colLabel = width - i; // 1 = units, 2 = tens, ...
+    if (op === '+') {
+      if (tKnown && bKnown) {
+        const sum = Number(t) + Number(b) + carry;
+        const digit = sum % 10;
+        const nextCarry = sum >= 10 ? 1 : 0;
+        if (!hadResult) { result[i] = String(digit); }
+        else if (!rKnown) { result[i] = String(digit); blanks.push({ row: 'result', index: i, digit: String(digit) }); }
+        else if (Number(r) !== digit) return { solvable: false }; // extracted digits are internally inconsistent — bail rather than show a wrong "fix"
+        steps.push(`Column ${colLabel}: ${t} + ${b}${carry ? ' + 1 (carried)' : ''} = ${sum} → write ${digit}${nextCarry ? ', carry 1' : ''}`);
+        carry = nextCarry;
+      } else if (unknownCount === 1 && hadResult && rKnown) {
+        if (!tKnown) {
+          let v = Number(r) - Number(b) - carry; let nextCarry = 0;
+          if (v < 0) { v += 10; } // shouldn't happen for '+', but guards against bad extraction
+          if (v < 0 || v > 9) return { solvable: false };
+          top[i] = String(v); blanks.push({ row: 'top', index: i, digit: String(v) });
+          steps.push(`Column ${colLabel}: ? + ${b}${carry ? ' + 1 (carried)' : ''} = ${r} → missing top digit is ${v}`);
+          carry = nextCarry;
+        } else {
+          let v = Number(r) - Number(t) - carry; let nextCarry = 0;
+          if (v < 0 || v > 9) return { solvable: false };
+          bottom[i] = String(v); blanks.push({ row: 'bottom', index: i, digit: String(v) });
+          steps.push(`Column ${colLabel}: ${t} + ? ${carry ? '+ 1 (carried) ' : ''}= ${r} → missing bottom digit is ${v}`);
+          carry = nextCarry;
+        }
+      } else {
+        return { solvable: false }; // under-determined column
+      }
+    } else {
+      // subtraction: top - bottom = result, with borrow propagating leftward
+      if (tKnown && bKnown) {
+        let tv = Number(t) - carry, borrowOut = 0;
+        if (tv < Number(b)) { tv += 10; borrowOut = 1; }
+        const digit = tv - Number(b);
+        if (!hadResult) { result[i] = String(digit); }
+        else if (!rKnown) { result[i] = String(digit); blanks.push({ row: 'result', index: i, digit: String(digit) }); }
+        else if (Number(r) !== digit) return { solvable: false };
+        steps.push(`Column ${colLabel}: ${t}${carry ? ' (borrowed, so ' + tv + ')' : ''} − ${b} = ${digit}${borrowOut ? ', borrow 1 from next column' : ''}`);
+        carry = borrowOut;
+      } else if (unknownCount === 1 && hadResult && rKnown) {
+        if (!bKnown) {
+          let tv = Number(t) - carry;
+          let v = tv - Number(r);
+          let borrowOut = 0;
+          if (v < 0) { v += 10; borrowOut = 1; }
+          if (v < 0 || v > 9) return { solvable: false };
+          bottom[i] = String(v); blanks.push({ row: 'bottom', index: i, digit: String(v) });
+          steps.push(`Column ${colLabel}: ${t}${carry ? ' (borrowed)' : ''} − ? = ${r} → missing bottom digit is ${v}`);
+          carry = borrowOut;
+        } else {
+          // top unknown, bottom & result known.
+          // t - carry - b = r  (if no further borrow needed)  =>  t = r + b + carry
+          // or, if that column itself needed a borrow: t = r + b + carry - 10
+          let v = Number(r) + Number(b) + carry;
+          let borrowOut = 0;
+          if (v > 9) { v -= 10; borrowOut = 1; }
+          if (v < 0 || v > 9) return { solvable: false };
+          top[i] = String(v); blanks.push({ row: 'top', index: i, digit: String(v) });
+          steps.push(`Column ${colLabel}: ? ${carry ? '(borrowed) ' : ''}− ${b} = ${r} → missing top digit is ${v}`);
+          carry = borrowOut;
+        }
+      } else {
+        return { solvable: false };
+      }
+    }
+  }
+  if (blanks.length === 0) return { solvable: false }; // nothing was actually missing — not this feature's concern
+  // Steps were pushed units-first (loop runs right→left); that IS the natural
+  // solving order a student follows, so no reordering needed here.
+  return {
+    solvable: true,
+    blanks,
+    solvedTopStr: top.join(''),
+    solvedBottomStr: bottom.join(''),
+    solvedResultStr: result.join(''),
+    steps,
+  };
+}
+
+// Brute-force fallback for columns with 2+ unknown digits (out of reach for the
+// carry/borrow fast path). Tries every digit 0-9 for each blank position and
+// keeps only assignments where top ± bottom EXACTLY equals the shown result.
+// Returns the unique solution, or null if there are zero or multiple — either
+// way the caller must not display an unverified guess. Capped at 6 blanks
+// (10^6 combinations) which comfortably covers any real worksheet puzzle
+// while keeping this instant.
+function bruteForceSolveVerticalMath(top, bottom, result, op, width) {
+  const blanks = [];
+  for (let i = 0; i < width; i++) {
+    if (top[i] === '_') blanks.push({ row: 'top', index: i });
+    if (bottom[i] === '_') blanks.push({ row: 'bottom', index: i });
+    if (result[i] === '_') blanks.push({ row: 'result', index: i });
+  }
+  if (blanks.length === 0 || blanks.length > 6) return null;
+  let solution = null;
+  const total = Math.pow(10, blanks.length);
+  for (let n = 0; n < total; n++) {
+    const t = top.slice(), b = bottom.slice(), r = result.slice();
+    let rem = n;
+    for (let k = 0; k < blanks.length; k++) {
+      const d = String(rem % 10);
+      rem = Math.floor(rem / 10);
+      const bl = blanks[k];
+      if (bl.row === 'top') t[bl.index] = d;
+      else if (bl.row === 'bottom') b[bl.index] = d;
+      else r[bl.index] = d;
+    }
+    if (width > 1 && t[0] === '0') continue; // no leading-zero numbers
+    if (width > 1 && b[0] === '0') continue;
+    const tv = Number(t.join('')), bv = Number(b.join('')), rv = Number(r.join(''));
+    const computed = op === '+' ? tv + bv : tv - bv;
+    if (computed !== rv) continue;
+    if (solution) return null; // second valid assignment found — ambiguous, refuse to guess
+    solution = { t, b, r };
+  }
+  return solution;
+}
+
+function normalizeMatchingTasks(quiz) {
+  (quiz.tasks || []).forEach((task, ti) => {
+    const qs = task.questions || [];
+    if (qs.length < 2) return;
+    const taskText = `${task.title || ''} ${task.description || ''} ${task.instructions || ''}`;
+    const looksMatching = /\bmatch(ing)?\b/i.test(taskText) || /జతపరచ/.test(taskText)
+      || qs.filter(q => /^match\b/i.test(q.question || '')).length >= 2;
+    if (!looksMatching) return;
+
+    // Word bank = every answer in the task (a matching column is one shared pool)
+    const bank = [...new Set(qs.map(q => String(q.answer ?? '').trim()).filter(Boolean))];
+    if (bank.length < 2) return;
+
+    let matched = 0;
+    qs.forEach((q, qi) => {
+      if (q.type === 'venn' || q.type === 'activity') return;
+      // Genuine MCQ with a flagged correct option — leave untouched
+      if (q.type === 'mcq' && Array.isArray(q.options) && q.options.some(o => o && o.correct)) { matched++; return; }
+      const ans = String(q.answer ?? '').trim();
+      if (!ans || !bank.includes(ans)) return;
+      matched++;
+      // Deterministic seeded shuffle: stable across re-renders, but the correct
+      // word's position varies per question (bank is in question order, so a
+      // plain rotation would park every correct answer in slot A)
+      const shuffled = bank.slice();
+      let s = ((ti + 1) * 2654435761 + (qi + 1) * 40503) >>> 0;
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        const j = s % (i + 1);
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      q.type = 'mcq';
+      q.options = shuffled.map(label => ({ label, correct: label === ans }));
+    });
+    if (matched >= 2) {
+      // Flags consumed by renderQuizHTML to draw the drag & drop matching UI
+      task._matchTask = true;
+      task._wordBank = bank;
+    }
+  });
+}
+
+function normalizeRiddleTables(quiz) {
+  for (const task of (quiz.tasks || [])) {
+    if (task.table && Array.isArray(task.table.rows) && task.table.rows.length) continue;
+    if (Array.isArray(task.tables) && task.tables.length) continue;
+    const qs = task.questions || [];
+    if (qs.length < 3) continue;
+
+    const blob = [task.title, task.passage, task.sharedImageDescription].join(' ').toLowerCase();
+    const looksLikeRiddleSet = /riddle|word bank/i.test(blob);
+    const iAmCount = qs.filter(q => /^i\s+am\b/i.test(String(q.question || '').trim())).length;
+    const shortTextAnswers = qs.filter(q => q.type !== 'numeric' && String(q.answer || '').trim().split(/\s+/).length <= 4).length;
+    if (!(looksLikeRiddleSet || iAmCount >= Math.ceil(qs.length * 0.6))) continue;
+    if (shortTextAnswers < qs.length) continue; // every row must be a short pick-the-word answer
+
+    task.table = {
+      headers: ['No.', 'Riddle', 'Answer'],
+      rows: qs.map((q, i) => [
+        { text: q.id || String(i + 1) },
+        { text: (q.question || '').replace(/\*\*(.+?)\*\*/g, '$1') },
+        { input: true, answer: q.answer, _qtype: 'text' },
+      ]),
+    };
+    task.questions = [];
+    task._tableFromQuestions = true;
+  }
+}
+
+// The source worksheet shows a row of given letters with ONE blank row beneath
+// (add a vowel-sign/dheergham to each letter and write it). The LLM sometimes
+// explodes this into a stack of near-identical "Add 'X' to 'Y' and write."
+// questions (one per letter) instead of the single table it visually is. Detect
+// that repeated phrasing regardless of exact wording and collapse it back into
+// a table (or several, chunked to match the source's per-row grouping), the
+// same way normalizeRiddleTables does for riddle sets.
+function normalizeLetterGridTables(quiz) {
+  const ADD_PATTERN = /^add\s+['"‘’“”]?(.+?)['"‘’“”]?\s+to\s+['"‘’“”]?(.+?)['"‘’“”]?\s+and\s+write\.?$/i;
+  for (const task of (quiz.tasks || [])) {
+    if (task.table && Array.isArray(task.table.rows) && task.table.rows.length) continue;
+    if (Array.isArray(task.tables) && task.tables.length) continue;
+    const qs = task.questions || [];
+    if (qs.length < 5) continue;
+
+    const parsed = qs.map(q => {
+      const m = String(q.question || '').trim().match(ADD_PATTERN);
+      return m ? { mark: m[1].trim(), letter: m[2].trim(), answer: q.answer } : null;
+    });
+    if (parsed.some(p => !p)) continue; // every question must match the pattern
+    const marks = new Set(parsed.map(p => p.mark));
+    if (marks.size > 1) continue; // should be the same symbol added throughout
+
+    const mark = parsed[0].mark;
+    const CHUNK = 10; // mirrors the ~10 letters-per-row grouping in the source worksheet
+    const tables = [];
+    for (let i = 0; i < parsed.length; i += CHUNK) {
+      const chunk = parsed.slice(i, i + CHUNK);
+      tables.push({
+        headers: ['Letter', ...chunk.map(c => c.letter)],
+        rows: [[
+          { text: mark },
+          ...chunk.map(c => ({ input: true, answer: c.answer, _qtype: 'text' })),
+        ]],
+      });
+    }
+    task.tables = tables;
+    task.questions = [];
+    task._tableFromQuestions = true;
+  }
+}
+
+// Rebuild task.table from questions the LLM split apart, e.g.
+// "Complete the Tally marks for Chutney", "Complete the Frequency for Chutney", ...
+function normalizeTables(quiz) {
+  for (const task of (quiz.tasks || [])) {
+    if (Array.isArray(task.tables) && task.tables.length) continue;
+    if (task.table && Array.isArray(task.table.rows) && task.table.rows.length) continue;
+    const qs = task.questions || [];
+    if (qs.length < 2) continue;
+
+    const parsed = [];
+    for (const q of qs) {
+      const m = String(q.question || '').match(/complete\s+the\s+(.+?)\s+for\s+(.+?)[:.\s]*$/i);
+      if (m) parsed.push({ col: m[1].trim(), row: m[2].trim(), answer: q.answer, type: q.type });
+    }
+    // Need at least 2 columns × 2 rows worth of grid signal
+    if (parsed.length < 3) continue;
+
+    const cols = [];
+    const rows = [];
+    for (const p of parsed) {
+      if (!cols.includes(p.col)) cols.push(p.col);
+      if (!rows.includes(p.row)) rows.push(p.row);
+    }
+    if (cols.length < 1 || rows.length < 2) continue;
+
+    const blob = [task.title, task.passage, task.sharedImageDescription].join(' ');
+    const hdrMatch = blob.match(/(favourite[\w ]*|item|name|word|category)[^\n.:]{0,20}/i);
+    const firstHeader = hdrMatch ? hdrMatch[0].trim() : 'Item';
+
+    const find = (col, row) => parsed.find(p => p.col === col && p.row === row);
+    task.table = {
+      headers: [firstHeader, ...cols],
+      rows: rows.map(r => [
+        { text: r },
+        ...cols.map(c => {
+          const p = find(c, r);
+          return { input: true, answer: p ? p.answer : '', _qtype: (p && p.type) || 'text' };
+        }),
+      ]),
+    };
+    task._tableFromQuestions = true;
+  }
+}
+
+// Build task.chart from a text description when the LLM didn't emit structured bars.
+function normalizeCharts(quiz) {
+  for (const task of (quiz.tasks || [])) {
+    if (task.chart && Array.isArray(task.chart.bars) && task.chart.bars.length) continue;
+    const blob = [task.title, task.sharedImageDescription, ...(task.questions || []).map(q => q.question || '')].join('  ');
+    if (!/bar\s*graph|column\s*chart|bar\s*chart/i.test(blob)) continue;
+    // Never auto-synthesize a chart for a task the AI already classified as an
+    // "activity" — that means the student draws/constructs the graph
+    // themselves on paper (e.g. "organize the data... draw a bar graph in
+    // your graph book"), so showing a pre-solved chart here defeats the
+    // exercise. This regex fallback used to run blind, ignoring that
+    // classification entirely — it would trigger on the mere PHRASE "bar
+    // graph" even when the worksheet was asking the student to draw one,
+    // not showing an existing one to read.
+    if ((task.questions || []).some(q => q.type === 'activity')) continue;
+    if (/\bdraw\b[^.]{0,40}\b(graph|chart)\b[^.]{0,25}\b(book|notebook|copy)\b/i.test(blob)) continue;
+
+    // Parse "football has 16 votes, tennis has 8, ..." → bars
+    const bars = [];
+    const re = /([A-Za-z][A-Za-z ]{1,24}?)\s+(?:has|=|:|scored|got)\s+(\d+)/gi;
+    let m;
+    while ((m = re.exec(blob)) !== null) {
+      const label = m[1].trim().replace(/^(and|the)\s+/i, '');
+      const value = parseInt(m[2], 10);
+      if (label && !isNaN(value) && label.length <= 24) bars.push({ label, value });
+    }
+    if (bars.length < 2) continue;
+
+    const yMaxMatch = blob.match(/(?:from\s*0\s*to|0\s*(?:to|-|–)\s*)(\d+)/i);
+    const maxVal = Math.max(...bars.map(b => b.value));
+    const yMax = yMaxMatch ? parseInt(yMaxMatch[1], 10) : Math.ceil(maxVal / 2) * 2;
+    const titleMatch = blob.match(/titled\s*['"]([^'"]+)['"]/i) || blob.match(/graph\s+(?:titled\s+)?['"]?([A-Z][\w ]{2,30})['"]?/);
+    task.chart = {
+      type: 'bar',
+      title: titleMatch ? titleMatch[1].trim() : 'Bar Graph',
+      yMax, yStep: yMax >= 20 ? 2 : Math.max(1, Math.round(yMax / 10)),
+      bars,
+    };
+    task.sharedImage = false;
+    delete task.sharedImageDescription;
+  }
+}
+
+// Convert **bold** markdown to <strong> tags.
+function fmt(text) {
+  if (!text) return '';
+  return String(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 }
 
 function renderQuizHTML(quiz, branding = {}) {

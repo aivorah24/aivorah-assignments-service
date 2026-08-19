@@ -181,3 +181,36 @@ describe('GET /assignments — teacherId path', () => {
     expect(res.body).toHaveLength(1);
   });
 });
+
+describe('GET /assignments — interactive quiz HTML live regeneration', () => {
+  test('a real assignment with interactive_quiz.tasks gets a real regenerated, non-null interactiveQuizHtml', async () => {
+    mockSb.setTable('users', usersRow());
+    mockSb.setTable('assignments', {
+      data: [assignmentRow({
+        id: 'a1',
+        interactive_quiz: { tasks: [{ title: 'Addition', questions: [{ type: 'mcq', question: 'What is 2+2?', options: ['3', '4', '5', '6'], answer: '4' }] }] },
+      })],
+      error: null,
+    });
+    mockSb.setTable('teacher_student', { data: [], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body[0].interactiveQuizHtml).toEqual(expect.any(String));
+    expect(res.body[0].interactiveQuizHtml).toContain('What is 2+2?');
+  });
+
+  test('an assignment with no interactive_quiz falls back to a real null (or stored) interactiveQuizHtml, no crash', async () => {
+    mockSb.setTable('users', usersRow());
+    mockSb.setTable('assignments', { data: [assignmentRow({ id: 'a1' })], error: null });
+    mockSb.setTable('teacher_student', { data: [], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body[0].interactiveQuizHtml).toBeNull();
+  });
+});
