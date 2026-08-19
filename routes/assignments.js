@@ -1724,4 +1724,14 @@ router.post('/validate-fill-blank', async (req, res) => {
   return res.json({ correct: false });
 });
 
+// Test-only exports — the router is still the default export used by
+// index.js/production; these attach the internal pure functions so unit
+// tests can exercise them directly instead of only indirectly via routes.
+router._internal = {
+  normalise, isPastDue, normalizeText, isGibberishAnswer, gibberishDescribed,
+  stripOptionPrefix, normaliseAnswerToOptionText, mcqToFillBlank,
+  normalizeQuizQuestion, normalizeQuizQuestions, normalizeQuizCount,
+  buildFallbackQuiz, resolveUserId, normaliseWithSubmission,
+};
+
 module.exports = router;
