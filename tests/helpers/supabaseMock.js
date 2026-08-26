@@ -28,6 +28,8 @@ function makeSupabaseMock() {
       maybeSingle: jest.fn(() => Promise.resolve(nextResponseFor(table))),
       upsert: jest.fn(() => Promise.resolve(nextResponseFor(table))),
       update: jest.fn(() => chain),
+      delete: jest.fn(() => chain),
+      insert: jest.fn(() => chain),
       then: (resolve, reject) => Promise.resolve(nextResponseFor(table)).then(resolve, reject),
     };
     return chain;

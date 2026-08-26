@@ -2,14 +2,24 @@
  * routes/assignments.js — Student-facing Assignments endpoints.
  *
  * Extracted from ai-mentor/server/routes/assignments.js (3490 lines, 19
- * endpoints covering both teacher-authoring and student-completion). Only
- * the 6 routes the student frontend actually calls are here — the
- * teacher-authoring endpoints (ai-generate, generate-steps, generate-ibpyp,
- * docx-to-pdf, extract-questions(-async), pdf-to-quiz, upload-doc, POST /,
- * GET /:id/submissions, PUT /:id/teacher-feedback, DELETE /:id) deliberately
- * stayed in the monolith — they depend on routes/quiz.js's teacher-side
- * generation pipeline (Cloudinary, Gemini, puppeteer/mammoth doc conversion,
- * the vision-grading upload wizard), a much heavier and differently-shaped
+ * endpoints covering both teacher-authoring and student-completion). Of
+ * the 19, 10 are here — the 6 original student-facing routes plus
+ * DELETE /:id, GET /:id/submissions, and PUT /:id/teacher-feedback (ported
+ * 2026-08-25: all three are self-contained — only touch supabase (+
+ * resolveUserId, already present here) — no dependency on the teacher-side
+ * generation pipeline below, so there was no reason to leave them behind
+ * once a teacher caller needed them — see useAssignmentsList.ts /
+ * useAssignmentDetail.ts in the frontend), plus a scoped-down POST /
+ * (ported 2026-08-26: plain creation only — title/subject/dueDate/
+ * studentId/createdById — for E2E test seeding via tests/helpers/api.js's
+ * createAssignment; the monolith's fuller POST / with AI-authoring fields,
+ * push notifications, and Qdrant auto-save stays in the monolith, see below).
+ * The remaining teacher-authoring endpoints (ai-generate, generate-steps,
+ * generate-ibpyp, docx-to-pdf, extract-questions(-async), pdf-to-quiz,
+ * upload-doc, the monolith's fuller POST /) deliberately stay in the
+ * monolith — they depend on routes/quiz.js's teacher-side generation
+ * pipeline (Cloudinary, Gemini, puppeteer/mammoth doc conversion, the
+ * vision-grading upload wizard), a much heavier and differently-shaped
  * dependency set than anything a student needs.
  *
  * The one exception: GET / calls normalise(), which live-regenerates the
@@ -453,6 +463,74 @@ const DEMO_MAP = {
 };
 
 // ── GET /assignments?studentId=... (also supports ?teacherId=...) ──
+// POST / — plain assignment creation (title/subject/dueDate/studentId/
+// createdById, optionally grade/curriculum/questions/type). Ported from
+// ai-mentor/server/routes/assignments.js's POST / (2026-08-26), scoped down:
+// this covers only the core insert + response every caller of this route
+// actually needs (E2E test seeding via tests/helpers/api.js's
+// createAssignment). The monolith's version also does push notifications and
+// a Qdrant auto-save of interactive-quiz content on create — both are
+// best-effort side effects of the AI-generation authoring flow (which still
+// lives in the monolith, see file header), not used by this route's callers,
+// so they're intentionally not ported here rather than added speculatively.
+router.post('/', async (req, res) => {
+  try {
+    const {
+      title, subject = '', chapter = '', dueDate, type = 'assignment', note = '',
+      studentId, createdById, createdByRole = 'teacher',
+      grade = null, curriculum = null, questions = [],
+    } = req.body;
+
+    if (!title || !dueDate) return res.status(400).json({ error: 'title and dueDate required' });
+
+    const userId    = studentId   ? await resolveUserId(studentId)   : null;
+    const creatorId = createdById ? await resolveUserId(createdById) : null;
+
+    let finalCurriculum = curriculum;
+    let finalGrade      = grade;
+    if (!userId && creatorId && (!finalCurriculum || !finalGrade)) {
+      const { data: creator } = await supabase
+        .from('users')
+        .select('curriculum, grade')
+        .eq('id', creatorId)
+        .maybeSingle();
+      if (!finalCurriculum) finalCurriculum = creator?.curriculum || null;
+      if (!finalGrade)      finalGrade      = creator?.grade      || null;
+    }
+    if (!userId && !finalCurriculum) {
+      return res.status(400).json({ error: 'Class-wide assignments need a curriculum so they only reach the right students. Set your curriculum in your profile or pick a specific student.' });
+    }
+
+    let creatorName = null;
+    if (creatorId) {
+      const { data: creator } = await supabase.from('users').select('name').eq('id', creatorId).maybeSingle();
+      creatorName = creator?.name || null;
+    }
+
+    const { data, error } = await supabase
+      .from('assignments')
+      .insert({
+        title, subject, chapter,
+        due_date:        dueDate,
+        type, note,
+        student_id:      userId,
+        created_by_id:   creatorId,
+        created_by_role: createdByRole,
+        created_by_name: creatorName,
+        grade:           finalGrade,
+        curriculum:      finalCurriculum,
+        questions:       Array.isArray(questions) ? questions : [],
+      })
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(normalise(data));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/', async (req, res) => {
   try {
   const { studentId, teacherId, viewerRole } = req.query;
@@ -1638,6 +1716,151 @@ router.put('/:id/complete', async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   const sub = studentUid ? { status: 'completed', score, completed_at: new Date().toISOString() } : null;
   res.json(normaliseWithSubmission(data, sub));
+});
+
+// ── DELETE /assignments/:id ──
+// Ported verbatim from ai-mentor/server/routes/assignments.js (2026-08-25) —
+// self-contained (only touches supabase), no dependency on the teacher-side
+// generation pipeline that kept this endpoint in the monolith originally.
+router.delete('/:id', async (req, res) => {
+  const { id } = req.params;
+  // Also remove the linked calendar entry from the DB (was previously filtering a
+  // local schedule.json that never existed on Cloud Run → orphaned schedule_events).
+  try { await supabase.from('schedule_events').delete().eq('assignment_id', id); } catch (_) {}
+  const { error } = await supabase.from('assignments').delete().eq('id', id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
+// ── GET /assignments/:id/submissions ──
+// Ported verbatim from ai-mentor/server/routes/assignments.js (2026-08-25) —
+// self-contained (only touches supabase), no dependency on the teacher-side
+// generation pipeline that kept this endpoint in the monolith originally.
+router.get('/:id/submissions', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get the assignment itself (for questions)
+    const { data: assignment } = await supabase
+      .from('assignments')
+      .select('id, title, type, questions, quiz_questions, interactive_quiz, grade, curriculum, student_id')
+      .eq('id', id)
+      .single();
+
+    if (!assignment) return res.status(404).json({ error: 'Assignment not found' });
+
+    // Get all submissions for this assignment
+    const { data: subs, error } = await supabase
+      .from('assignment_submissions')
+      .select('student_id, status, score, ai_feedback, completed_at, submission_text')
+      .eq('assignment_id', id)
+      .order('completed_at', { ascending: false });
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    if (!subs || subs.length === 0) {
+      return res.json({ submissions: [], totalLinked: 0 });
+    }
+
+    // Enrich with student names
+    const studentIds = subs.map(s => s.student_id).filter(Boolean);
+    const { data: users } = await supabase
+      .from('users')
+      .select('id, name, grade')
+      .in('id', studentIds);
+
+    const userMap = {};
+    (users || []).forEach(u => { userMap[u.id] = u; });
+
+    // Count total linked students (for class-wide assignments)
+    let totalLinked = subs.length;
+    if (!assignment.student_id) {
+      const { count } = await supabase
+        .from('teacher_student')
+        .select('student_id', { count: 'exact', head: true });
+      totalLinked = count || subs.length;
+    }
+
+    // Best-effort question-text backfill for OLDER submissions captured before the
+    // client-side quiz template tagged each answer with its actual question text
+    // (they were stored with question: "") — recover it from the assignment's own
+    // interactive_quiz task list, matched by order. New submissions already carry
+    // real question text and don't need this.
+    const quizTasks = Array.isArray(assignment.interactive_quiz?.tasks) ? assignment.interactive_quiz.tasks : [];
+    function taskLabel(t) {
+      if (!t) return '';
+      return t.question || t.prompt || t.title || t.stepLabel || (t.type ? `(${t.type})` : '');
+    }
+
+    const submissions = subs.map(s => {
+      // Parse submission_text for per-question data
+      let perQuestion = [];
+      let studentAnswers = [];
+      try {
+        const parsed = JSON.parse(s.submission_text || '{}');
+        perQuestion = parsed.perQuestion || [];
+        studentAnswers = parsed.answers || [];
+      } catch {}
+      perQuestion = perQuestion.map((q, i) => (!q.question && quizTasks[i]) ? { ...q, question: taskLabel(quizTasks[i]) } : q);
+      return {
+        studentId:      s.student_id,
+        studentName:    userMap[s.student_id]?.name || 'Unknown',
+        grade:          userMap[s.student_id]?.grade || null,
+        status:         s.status,
+        score:          s.score,
+        aiFeedback:     s.ai_feedback,
+        completedAt:    s.completed_at,
+        perQuestion,
+        studentAnswers,
+      };
+    });
+
+    res.json({ submissions, totalLinked, questions: assignment.questions || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PUT /assignments/:id/teacher-feedback ──
+// Teacher sends feedback on a student's submission. Visible to student + parent.
+// Ported verbatim from ai-mentor/server/routes/assignments.js (2026-08-25) —
+// self-contained (only touches supabase + resolveUserId, already present
+// here), no dependency on the teacher-side generation pipeline that kept
+// this endpoint in the monolith originally.
+router.put('/:id/teacher-feedback', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { studentId, feedback } = req.body;
+    if (!studentId || !feedback) return res.status(400).json({ error: 'studentId and feedback required' });
+
+    const userId = await resolveUserId(studentId);
+    if (!userId) return res.status(400).json({ error: 'Student not found' });
+
+    // Get current submission
+    const { data: sub } = await supabase
+      .from('assignment_submissions')
+      .select('ai_feedback')
+      .eq('assignment_id', id)
+      .eq('student_id', userId)
+      .single();
+
+    // Merge teacher feedback into ai_feedback JSON
+    let feedbackObj = {};
+    try { feedbackObj = JSON.parse(sub?.ai_feedback || '{}'); } catch { feedbackObj = { text: sub?.ai_feedback || '' }; }
+    feedbackObj.teacherFeedback = feedback;
+    feedbackObj.teacherFeedbackAt = new Date().toISOString();
+
+    const { error } = await supabase
+      .from('assignment_submissions')
+      .update({ ai_feedback: JSON.stringify(feedbackObj) })
+      .eq('assignment_id', id)
+      .eq('student_id', userId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ ok: true, feedback: feedbackObj });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── POST /assignments/:id/explain-question ──
