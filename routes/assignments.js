@@ -478,7 +478,7 @@ router.post('/', async (req, res) => {
     const {
       title, subject = '', chapter = '', dueDate, type = 'assignment', note = '',
       studentId, createdById, createdByRole = 'teacher',
-      grade = null, curriculum = null, questions = [],
+      grade = null, curriculum = null, questions = [], quizQuestions = [],
     } = req.body;
 
     if (!title || !dueDate) return res.status(400).json({ error: 'title and dueDate required' });
@@ -520,6 +520,7 @@ router.post('/', async (req, res) => {
         grade:           finalGrade,
         curriculum:      finalCurriculum,
         questions:       Array.isArray(questions) ? questions : [],
+        quiz_questions:  Array.isArray(quizQuestions) ? quizQuestions : [],
       })
       .select()
       .single();
