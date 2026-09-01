@@ -684,6 +684,103 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ── POST /assignments/ai-generate ──────────────────────────────────────
+// Parent-facing AI generate: turns a free-text description ("Give 3
+// multiplication word problems for Grade 4") into a structured
+// assignment/quiz. Ported from the monolith's ai-mentor/server/routes/
+// assignments.js (same route, same request/response shape) as part of
+// assignments-service owning the Assignment domain across all three
+// personas - unlike /generate-quiz above (teacher-facing, Qdrant-grounded),
+// this one is intentionally self-contained: no curriculum retrieval, just
+// a system-prompt-driven Groq call, matching what the monolith route did.
+router.post('/ai-generate', async (req, res) => {
+  const { prompt = '', subject = 'Mathematics', grade = 'Grade 3', curriculum = 'IB PYP', count = 5, type: reqType = '' } = req.body;
+  if (!prompt.trim()) return res.status(400).json({ error: 'prompt required' });
+
+  const questionCount = Math.max(3, Math.min(10, Number(count) || 5));
+  const wantQuiz = (reqType || 'quiz') === 'quiz';
+  // For a QUIZ, generate multiple-choice questions with 4 options + the correct
+  // answer, so the child answers by picking an option (matching the teacher flow).
+  // For an ASSIGNMENT, plain open-response questions are fine.
+  const systemPrompt = wantQuiz
+    ? `You are an expert ${curriculum} ${grade} ${subject} teacher.
+A parent wants a multiple-choice quiz for their child. Generate a structured quiz.
+Return ONLY valid JSON — no markdown, no explanation — in this exact shape:
+{
+  "title": "short quiz title (max 10 words)",
+  "chapter": "topic or chapter name",
+  "type": "quiz",
+  "note": "2-3 sentence encouraging note to the child explaining what to do",
+  "questions": [
+    { "question": "What is 3 groups of 4 pencils in total?", "options": ["10", "12", "7", "16"], "correct": "12" }
+  ]
+}
+Rules:
+- Keep language simple and age-appropriate for ${grade}
+- Generate exactly ${questionCount} questions matching the difficulty of ${grade} ${subject}
+- EVERY question MUST have EXACTLY 4 options and a "correct" that equals one of those 4 options verbatim
+- options MUST be the REAL answer choices (actual numbers or words the child chooses between), NEVER placeholder letters like "A", "B", "C", "D"
+- exactly one option is correct; the other three must be plausible but wrong
+- note should be warm, encouraging, and motivating for a young learner
+- Align content to ${curriculum} standards`
+    : `You are an expert ${curriculum} ${grade} ${subject} teacher.
+A parent has described what they want their child to practice. Generate a structured assignment.
+Return ONLY valid JSON — no markdown, no explanation — in this exact shape:
+{
+  "title": "short assignment title (max 10 words)",
+  "chapter": "topic or chapter name",
+  "type": "assignment",
+  "note": "2-3 sentence encouraging note to the child explaining what to do",
+  "questions": ["question 1", "question 2", ...]
+}
+Rules:
+- Keep language simple and age-appropriate for ${grade}
+- questions array: generate exactly ${questionCount} questions matching the difficulty of ${grade} ${subject}
+- note should be warm, encouraging, and motivating for a young learner
+- Align content to ${curriculum} standards`;
+
+  try {
+    const completion = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-120b',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Parent request: "${prompt.trim()}"` },
+      ],
+      temperature: 0.7,
+      max_tokens: 800,
+    });
+
+    const raw = completion.choices[0]?.message?.content?.trim() || '';
+    const jsonStr = raw.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    let result;
+    try { result = JSON.parse(jsonStr); }
+    catch { return res.status(500).json({ error: 'AI returned invalid JSON', raw }); }
+
+    const outType = result.type === 'quiz' ? 'quiz' : 'assignment';
+    const rawQuestions = Array.isArray(result.questions) ? result.questions : [];
+    let quizQuestions = [];
+    let questions = [];
+    if (outType === 'quiz') {
+      quizQuestions = normalizeQuizQuestions(rawQuestions);
+      questions = quizQuestions.map(q => q.question);
+    } else {
+      questions = rawQuestions.map(q => (typeof q === 'string' ? q : (q && q.question) || '')).filter(Boolean);
+    }
+
+    res.json({
+      title:     result.title     || 'AI Generated Assignment',
+      chapter:   result.chapter   || '',
+      type:      outType,
+      note:      result.note      || '',
+      questions,
+      quizQuestions,
+    });
+  } catch (e) {
+    console.error('[ai-generate] error:', e.message);
+    res.status(500).json({ error: 'Groq AI generation failed', detail: e.message });
+  }
+});
+
 // ── POST /assignments/generate-quiz ──
 router.post('/generate-quiz', async (req, res) => {
   const {
