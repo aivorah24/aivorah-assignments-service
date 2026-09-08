@@ -1,0 +1,17 @@
+{
+  "_source": "Extracted directly from ncert.nic.in/textbook.php's own per-class subject <select> JS arrays (the live/uncommented blocks, not the old-curriculum commented-out ones) on 2026-07-26. This is the authority for which subjects a CBSE/NCERT grade may have.",
+  "byGrade": {
+    "1":  ["English", "Mathematics", "Hindi", "Urdu"],
+    "2":  ["Mathematics", "Hindi", "English", "Urdu"],
+    "3":  ["Mathematics", "English", "Hindi", "The World Around Us", "Arts", "Physical Education and Well Being", "Urdu"],
+    "4":  ["Mathematics", "Hindi", "English", "The World Around Us", "Arts", "Physical Education and Well Being", "Urdu"],
+    "5":  ["Mathematics", "Hindi", "English", "The World Around Us", "Arts", "Physical Education and Well Being", "Urdu"],
+    "6":  ["Hindi", "English", "Mathematics", "Social Science", "Sanskrit", "Science", "Arts", "Physical Education and Well Being", "Vocational Education"],
+    "7":  ["Hindi", "English", "Mathematics", "Social Science", "Sanskrit", "Science", "Arts", "Physical Education and Well Being", "Vocational Education"],
+    "8":  ["Hindi", "English", "Mathematics", "Social Science", "Sanskrit", "Science", "Arts", "Physical Education and Well Being", "Vocational Education"],
+    "9":  ["English", "Hindi", "Sanskrit", "Mathematics", "Science", "Social Science", "Arts", "Urdu", "Physical Education and Well Being"],
+    "10": ["Mathematics", "Science", "Hindi", "Social Science", "English", "Sanskrit", "Urdu", "Health and Physical Education"],
+    "11": ["Sanskrit", "Accountancy", "Chemistry", "Mathematics", "Statistics", "Biology", "Psychology", "Geography", "Physics", "Hindi", "Sociology", "English", "Political Science", "History", "Economics", "Business Studies", "Urdu", "Home Science", "Creative Writing and Translation", "Fine Art", "Informatics Practices", "Computer Science", "Health and Physical Education", "Biotechnology", "Sangeet", "Knowledge Traditions Practices of India"],
+    "12": ["Mathematics", "Physics", "Accountancy", "Sanskrit", "Hindi", "English", "Biology", "History", "Geography", "Psychology", "Sociology", "Chemistry", "Political Science", "Economics", "Business Studies", "Home Science", "Urdu", "Creative Writing & Translation", "Fine Art", "Computer Science", "Informatics Practices", "Biotechnology", "Sangeet"]
+  }
+}
