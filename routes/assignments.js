@@ -14,13 +14,30 @@
  * studentId/createdById — for E2E test seeding via tests/helpers/api.js's
  * createAssignment; the monolith's fuller POST / with AI-authoring fields,
  * push notifications, and Qdrant auto-save stays in the monolith, see below).
+ * extract-questions / extract-questions-async / extractWorksheetContent()
+ * were ported here 2026-09-10 (B02/B04 follow-up) so the curriculum- and
+ * responseType-detection fixes have a real home outside the monolith - see
+ * useUploadWorksheet.ts, now pointed at ASSIGNMENTS_SERVER_URL for these.
+ * Ported WITHOUT the Qwen/Pixtral vision-fallback hops from the monolith's
+ * copy: both silently ignore the extraction prompt (they build their own
+ * quiz-generation prompt instead - a pre-existing, separate bug, verified by
+ * reading callQwenVision/callPixtralVision in the monolith's quiz.js) and so
+ * were never actually functional for extraction - porting them would only
+ * copy known-broken behavior. The fallback chain here is Gemini -> a direct
+ * Groq vision call (which DOES receive the real extraction prompt), so
+ * genuine resilience is unchanged; only the two non-functional hops in the
+ * middle are gone. Needs the job queue (services/jobQueue.js,
+ * services/jobHandlers.js, routes/jobs.js, ported the same day) for the
+ * async variant's queuing/polling contract.
+ *
  * The remaining teacher-authoring endpoints (ai-generate, generate-steps,
- * generate-ibpyp, docx-to-pdf, extract-questions(-async), pdf-to-quiz,
- * upload-doc, the monolith's fuller POST /) deliberately stay in the
- * monolith — they depend on routes/quiz.js's teacher-side generation
- * pipeline (Cloudinary, Gemini, puppeteer/mammoth doc conversion, the
- * vision-grading upload wizard), a much heavier and differently-shaped
- * dependency set than anything a student needs.
+ * generate-ibpyp, docx-to-pdf, pdf-to-quiz, upload-doc, the monolith's
+ * fuller POST /) still deliberately stay in the monolith — they depend on
+ * routes/quiz.js's teacher-side generation pipeline (Cloudinary, Gemini,
+ * puppeteer/mammoth doc conversion, the vision-grading upload wizard), a
+ * much heavier and differently-shaped dependency set than anything a
+ * student needs, and docx-to-pdf specifically needs Puppeteer - a real
+ * infra/cost decision deliberately not made as part of this migration.
  *
  * The one exception: GET / calls normalise(), which live-regenerates the
  * interactive-quiz HTML via renderQuizHTML (from quiz.js) on every read so
@@ -42,8 +59,13 @@ const cloudinary = require('cloudinary').v2;
 const crypto     = require('crypto');
 const { renderQuizHTML } = require('../utils/quizHtmlRenderer');
 const { resolveCorrectFromScore } = require('../utils/grading');
+const { normalizeCurriculum } = require('../utils/curriculum');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { publishJob } = require('../services/jobQueue');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -565,6 +587,310 @@ const DEMO_MAP = {
 // best-effort side effects of the AI-generation authoring flow (which still
 // lives in the monolith, see file header), not used by this route's callers,
 // so they're intentionally not ported here rather than added speculatively.
+// ── extractWorksheetContent(fileList) ──────────────────────────────
+// Ported from ai-mentor/server/routes/assignments.js 2026-09-10 (B02/B04
+// follow-up) - see file header comment for the full rationale, especially
+// why the Qwen/Pixtral vision hops were dropped rather than ported as-is.
+async function extractWorksheetContent(fileList) {
+  const extractPrompt = `You are analyzing a page from a school worksheet. Extract ALL educational content visible on this page.
+Return ONLY a valid JSON object with these fields:
+{
+  "title": "this worksheet's SPECIFIC topic/activity name — see TITLE RULES below",
+  "chapter": "chapter, unit, or topic code (e.g. 'MHLE 22', 'THLE-2', 'Addition and Subtraction') — see TITLE RULES below",
+  "subject": "the subject CATEGORY — see SUBJECT RULES below",
+  "language": "ONLY for language/literacy worksheets: the SPECIFIC language (e.g. 'Telugu', 'Hindi', 'English') — see SUBJECT RULES below. Empty string for non-language subjects.",
+  "grade": "grade or PYP level, ONLY if an explicit label like 'Grade 3', 'Class 4', 'PYP 2' is visible on the page — otherwise empty string",
+  "curriculum": "the curriculum/board — see CURRICULUM RULES below",
+  "purpose": "the purpose or objective stated on the worksheet",
+  "learningOutcomes": ["learning outcomes exactly as written"],
+  "taskDescription": "full task/activity instructions including ALL task descriptions on this page",
+  "questions": [
+    {
+      "text": "the full question or task text",
+      "needsImage": false,
+      "imageYStart": 0,
+      "imageYEnd": 100,
+      "responseType": "text — see RESPONSE TYPE RULES below"
+    }
+  ],
+  "wordBank": ["words from any Word Bank section"],
+  "successCriteria": ["items from any Success Criteria or self-assessment checklist"],
+  "stamps": ["names of any stamps, badges, or rewards shown"],
+  "feedbackSection": "any feedback/feedforward/reflection instructions"
+}
+
+SUBJECT RULES — this decides which grade/subject library a student ever sees this worksheet in, so guessing wrong is worse than leaving it blank:
+- "subject" must be one of these categories: Mathematics, Science, English, Social Studies, Language Acquisition, Visual Arts, ICT, Physical Education. Pick based on the ACTUAL SCRIPT/LANGUAGE the riddles/questions/instructions are written in — never from a generic printed label.
+- IMPORTANT: Worksheets often print a generic self-description like "Subject Focus: Language" or "Language Arts" as a category header — this is NOT the same as the worksheet actually being written in a non-English language. That label alone does NOT mean "Language Acquisition". You must look at the actual words on the page: if the riddles/tasks/instructions are written in English script, the subject is "English", full stop — regardless of any generic "Language" header printed on the sheet.
+- Only classify as "Language Acquisition" when the actual body text (the riddles, sentences, vocabulary words being tested) is genuinely written in a non-English script (Telugu, Devanagari/Hindi, etc.) — set "language" to that SPECIFIC language, identified purely from the script actually printed. Do not guess the language from a series name, filename, or a generic subject header — read the actual text characters.
+- If the worksheet's actual sentences/questions are in English (even if it's an English worksheet ABOUT vocabulary, economics terms, spelling, etc.), set "subject" to "English" and leave "language" empty.
+- If the subject truly cannot be determined from what's on the page, return an empty string for "subject" rather than a guess.
+
+CURRICULUM RULES — this decides whether the worksheet is filed under the right board — guessing wrong is worse than leaving it blank:
+- Set "curriculum" ONLY when the page itself explicitly names or labels a curriculum/board — read the actual label printed on the page, do not infer it from subject, language, or title.
+- IB worksheets print the short form "PYP" (e.g. "PYP: 2", "PYP 2", "Name of Learner: PYP 2") rather than spelling out "IB PYP" — this IS the IB Primary Years Programme. When you see "PYP" printed on the page, output the curriculum's actual name: "IB PYP".
+- Other boards print their own name directly (e.g. "CBSE", "NCERT", "ICSE", "NIOS", "Cambridge") — output exactly what's printed.
+- If no curriculum/board indicator is visible anywhere on the page, return an empty string for "curriculum" rather than a guess.
+
+TITLE RULES — a repeating series/workbook name (e.g. a program banner like "Vocabulary Building" printed identically across many different worksheets) is NOT this worksheet's title. Do not confuse the two:
+- Prefer a specific unit/chapter CODE if one is printed (e.g. "MHLE 22", "THLE-2") — these uniquely identify this exact worksheet.
+- Otherwise, derive the title from what this specific page actually asks the student to do (e.g. "Match the correct word to the pictures" → title could be "Match Word to Picture"), not from a large/bold banner alone.
+- Large/bold text at the top is a title CANDIDATE only — verify it's specific to this page's content before using it. If it reads like a series/program/book name rather than this page's specific topic, prefer the chapter code or the task content instead.
+- "chapter" = the topic/MHLE number/unit. Put in BOTH "title" AND "chapter" only when they're genuinely the same thing.
+
+QUESTION FORMAT RULES:
+- Each question must be an object with "text", "needsImage", "imageYStart", and "imageYEnd".
+- "needsImage": set to true ONLY if the question requires a visual (diagram, shape, table, math calculation layout, picture, choice board) to answer. Pure text/word problems do NOT need images.
+- "imageYStart" and "imageYEnd": approximate vertical position (0-100 percentage) of the relevant visual content on this page. 0 = very top, 100 = very bottom. For example, if a diagram is in the middle of the page, use imageYStart: 40, imageYEnd: 70.
+- Examples of questions that NEED images: "Find the area of the irregular shape", "Calculate the missing digits" (with a visual grid), "Use the code table to decode".
+- Examples that do NOT need images: "A market sells 476 apples...", "Amit jogged four times around the park...".
+- IMPORTANT: Group related calculations as ONE task. If there are 9 addition/subtraction problems under one "Task 1", that is ONE question like "Task 1: Solve each problem and use the code to discover the secret message [9 calculations]", NOT 9 separate questions. Each distinct Task heading = one question.
+
+RESPONSE TYPE RULES — this is completely separate from "needsImage" above. "needsImage" is about whether the QUESTION itself needs a picture shown to the student to understand it. "responseType" is about what the STUDENT must submit as their ANSWER:
+- Set "responseType" to "drawing" ONLY when the task explicitly instructs the student to draw, sketch, illustrate, colour, or create a diagram/picture as their answer (e.g. "Draw your farm in the space provided", "Draw and label the parts of a plant", "Sketch your favourite animal"). A text answer is not possible for these — the student's actual work IS the drawing.
+- Do NOT set "responseType" to "drawing" just because a task is ABOUT a visual topic, or because the page HAS a drawing box printed on it for a DIFFERENT sub-task — only the specific task that instructs drawing gets this type. A worksheet with both a drawing box AND a separate paragraph-writing task on the same page has TWO questions: one "drawing", one "text".
+- Every other question (write, solve, answer, fill in, circle, match, list, explain) is "text" — the vast majority of questions are "text". If truly unsure, use "text".
+
+GENERAL RULES:
+- Extract EVERY task on this page. Each task is a separate question.
+- Word problems should be extracted in full.
+- Include enrichment tasks and reflection questions.
+- "learningOutcomes" are goals at the top. "successCriteria" are self-check items — extract these ONLY if explicitly printed, never inferred.
+- Do NOT invent questions. Only extract what is actually written on the page.
+- If a page has no questions, set "questions" to empty array.
+- Read EVERY piece of text carefully.`;
+
+  try {
+    const merged = {
+      title: '', chapter: '', subject: '', language: '', grade: '', curriculum: '', purpose: '',
+      learningOutcomes: [], taskDescription: '',
+      questions: [], wordBank: [], successCriteria: [], stamps: [], feedbackSection: '',
+      hasVisualContent: false, visualDescriptions: [],
+    };
+
+    async function extractOnePage(file) {
+      let extracted = {};
+
+      if (file.mime === 'application/pdf') {
+        const pdfParse = require('pdf-parse');
+        const buffer = Buffer.from(file.base64, 'base64');
+        const pdfData = await pdfParse(buffer);
+        const text = pdfData.text?.trim();
+        if (!text) return null;
+
+        const completion = await groq.chat.completions.create({
+          model: 'openai/gpt-oss-120b',
+          messages: [{ role: 'user', content: `${extractPrompt}\n\nAssignment text:\n${text.slice(0, 4000)}` }],
+          response_format: { type: 'json_object' },
+        });
+        extracted = JSON.parse(completion.choices[0].message.content);
+      } else if (file.mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        const mammoth = require('mammoth');
+        const buffer = Buffer.from(file.base64, 'base64');
+        const result = await mammoth.extractRawText({ buffer });
+        const text = result.value?.trim();
+        if (!text) return null;
+
+        const completion = await groq.chat.completions.create({
+          model: 'openai/gpt-oss-120b',
+          messages: [{ role: 'user', content: `${extractPrompt}\n\nAssignment text:\n${text.slice(0, 4000)}` }],
+          response_format: { type: 'json_object' },
+        });
+        extracted = JSON.parse(completion.choices[0].message.content);
+      } else {
+        // Fallback chain: Gemini -> direct Groq vision. Qwen/Pixtral hops
+        // deliberately dropped - see file header comment for why (they
+        // ignore the extraction prompt entirely, so were never functional
+        // for this purpose in the monolith's copy either).
+        let raw;
+        try {
+          if (!genAI) throw new Error('GEMINI_API_KEY not configured');
+          const model = genAI.getGenerativeModel({
+            model: 'gemini-2.5-flash',
+            generationConfig: { responseMimeType: 'application/json', temperature: 0 }
+          });
+          const result = await model.generateContent([
+            { inlineData: { mimeType: file.mime || 'image/jpeg', data: file.base64 } },
+            { text: extractPrompt },
+          ]);
+          raw = result.response.text();
+        } catch (geminiErr) {
+          console.log('[extract] Gemini failed, trying Groq vision:', geminiErr.message);
+          const completion = await groq.chat.completions.create({
+            model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+            temperature: 0,
+            max_tokens: 2000,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: extractPrompt },
+                { type: 'image_url', image_url: { url: `data:${file.mime};base64,${file.base64}` } },
+              ],
+            }],
+          });
+          raw = completion.choices[0].message.content;
+        }
+        raw = (raw || '').replace(/```json|```/g, '').trim();
+        console.log('[extract] Raw AI response:', raw.slice(0, 500));
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (jsonMatch) raw = jsonMatch[0];
+        try { extracted = JSON.parse(raw); } catch {
+          raw = raw.replace(/,\s*([}\]])/g, '$1');
+          try { extracted = JSON.parse(raw); } catch { return null; }
+        }
+      }
+
+      console.log('[extract] Page result:', JSON.stringify({ chapter: extracted.chapter, title: extracted.title, successCriteria: extracted.successCriteria, learningOutcomes: extracted.learningOutcomes }));
+      return extracted;
+    }
+
+    const perPageResults = await Promise.all(
+      fileList.map(file => extractOnePage(file).catch(e => { console.log('[extract] page failed:', e.message); return null; }))
+    );
+
+    for (let pageIdx = 0; pageIdx < perPageResults.length; pageIdx++) {
+      const extracted = perPageResults[pageIdx];
+      if (!extracted) continue;
+      if (extracted.title && !merged.title) merged.title = extracted.title;
+      if (extracted.chapter && !merged.chapter) merged.chapter = extracted.chapter;
+      if (extracted.subject && !merged.subject) merged.subject = extracted.subject;
+      if (extracted.language && !merged.language) merged.language = extracted.language;
+      if (extracted.grade && !merged.grade) merged.grade = extracted.grade;
+      if (extracted.curriculum && !merged.curriculum) merged.curriculum = extracted.curriculum;
+      if (extracted.purpose && !merged.purpose) merged.purpose = extracted.purpose;
+      if (extracted.taskDescription && !merged.taskDescription) merged.taskDescription = extracted.taskDescription;
+      if (extracted.feedbackSection && !merged.feedbackSection) merged.feedbackSection = extracted.feedbackSection;
+      if (Array.isArray(extracted.learningOutcomes)) merged.learningOutcomes.push(...extracted.learningOutcomes);
+      if (Array.isArray(extracted.questions)) {
+        extracted.questions.forEach(q => {
+          if (typeof q === 'string') {
+            merged.questions.push({ text: q, pageIndex: pageIdx, needsImage: false, imageYStart: 0, imageYEnd: 100, responseType: 'text' });
+          } else {
+            merged.questions.push({
+              text: q.text || q,
+              pageIndex: pageIdx,
+              needsImage: !!q.needsImage,
+              imageYStart: q.imageYStart ?? 0,
+              imageYEnd: q.imageYEnd ?? 100,
+              responseType: q.responseType === 'drawing' ? 'drawing' : 'text',
+            });
+          }
+        });
+      }
+      if (Array.isArray(extracted.wordBank)) merged.wordBank.push(...extracted.wordBank);
+      if (Array.isArray(extracted.successCriteria)) merged.successCriteria.push(...extracted.successCriteria);
+      if (Array.isArray(extracted.stamps)) merged.stamps.push(...extracted.stamps);
+      if (extracted.hasVisualContent) merged.hasVisualContent = true;
+      if (extracted.visualDescription) merged.visualDescriptions.push(extracted.visualDescription);
+    }
+
+    const seenQ = new Set();
+    merged.questions = merged.questions.filter(q => {
+      if (seenQ.has(q.text)) return false;
+      seenQ.add(q.text);
+      return true;
+    }).slice(0, 15);
+    merged.wordBank = [...new Set(merged.wordBank)];
+    merged.successCriteria = [...new Set(merged.successCriteria)];
+    merged.stamps = [...new Set(merged.stamps)];
+    merged.learningOutcomes = [...new Set(merged.learningOutcomes)];
+
+    if (!merged.title && fileList.length > 0 && fileList[0].mime !== 'application/pdf') {
+      try {
+        const titleCompletion = await groq.chat.completions.create({
+          model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+          temperature: 0,
+          max_tokens: 200,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: 'What is the title or heading of this worksheet? Look for large, bold, or decorative text at the top of the page. Reply with ONLY the title text, nothing else. If you cannot find a title, reply with "NONE".' },
+              { type: 'image_url', image_url: { url: `data:${fileList[0].mime};base64,${fileList[0].base64}` } },
+            ],
+          }],
+        });
+        const titleRaw = titleCompletion.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
+        console.log('[extract] Title fallback result:', titleRaw);
+        if (titleRaw && titleRaw !== 'NONE' && titleRaw.length < 100) {
+          merged.title = titleRaw;
+          if (!merged.chapter) merged.chapter = titleRaw;
+        }
+      } catch (e2) { console.log('[extract] Title fallback failed:', e2.message); }
+    }
+
+    const VALID_SUBJECTS = ['Mathematics', 'Science', 'English', 'Social Studies', 'Language Acquisition', 'Visual Arts', 'ICT', 'Physical Education'];
+    if (merged.subject) {
+      const matched = VALID_SUBJECTS.find(s => s.toLowerCase() === merged.subject.trim().toLowerCase());
+      if (!matched) {
+        console.log(`[extract] Rejected out-of-list subject "${merged.subject}" — clearing rather than trusting it.`);
+        merged.subject = '';
+      } else {
+        merged.subject = matched;
+      }
+    }
+    if (merged.grade) {
+      const gradeText = merged.grade.trim();
+      const looksLikeGrade = /^(grade|class|pyp|std\.?|standard)\s*\d{1,2}$/i.test(gradeText) || /^\d{1,2}(st|nd|rd|th)?$/i.test(gradeText);
+      if (!looksLikeGrade) {
+        console.log(`[extract] Rejected implausible grade "${gradeText}" — clearing rather than trusting it.`);
+        merged.grade = '';
+      }
+    }
+    if (merged.curriculum) {
+      const curriculumText = merged.curriculum.trim();
+      const looksLikeCurriculum = curriculumText.length <= 20 && /^[a-z0-9 .\-]+$/i.test(curriculumText);
+      if (!looksLikeCurriculum) {
+        console.log(`[extract] Rejected implausible curriculum "${curriculumText}" — clearing rather than trusting it.`);
+        merged.curriculum = '';
+      } else {
+        merged.curriculum = normalizeCurriculum(curriculumText, '');
+      }
+    }
+
+    console.log('[extract] Final merged:', JSON.stringify({ title: merged.title, chapter: merged.chapter, subject: merged.subject, language: merged.language, grade: merged.grade, curriculum: merged.curriculum, successCriteria: merged.successCriteria.length, wordBank: merged.wordBank.length }));
+    return merged;
+  } catch (e) {
+    console.error('extract-questions error:', e.message);
+    throw e;
+  }
+}
+
+// ── POST /assignments/extract-questions ───────────────────────────
+router.post('/extract-questions', async (req, res) => {
+  const { fileBase64, mimeType, files } = req.body;
+  let fileList = [];
+  if (Array.isArray(files) && files.length > 0) {
+    fileList = files.map(f => ({ base64: f.base64, mime: f.mimeType || 'image/jpeg' }));
+  } else if (fileBase64) {
+    fileList = [{ base64: fileBase64, mime: mimeType || 'image/jpeg' }];
+  }
+  if (fileList.length === 0) return res.status(400).json({ error: 'No files provided' });
+  try {
+    const merged = await extractWorksheetContent(fileList);
+    res.json(merged);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /assignments/extract-questions-async ──────────────────────
+router.post('/extract-questions-async', async (req, res) => {
+  const { fileBase64, mimeType, files } = req.body;
+  let fileList = [];
+  if (Array.isArray(files) && files.length > 0) {
+    fileList = files.map(f => ({ base64: f.base64, mime: f.mimeType || 'image/jpeg' }));
+  } else if (fileBase64) {
+    fileList = [{ base64: fileBase64, mime: mimeType || 'image/jpeg' }];
+  }
+  if (fileList.length === 0) return res.status(400).json({ error: 'No files provided' });
+  try {
+    const { jobId } = await publishJob('worksheet_extract', { fileList });
+    res.json({ jobId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.post('/', async (req, res) => {
   try {
     const {
@@ -2207,3 +2533,4 @@ router._internal = {
 
 module.exports = router;
 module.exports.normalizeQuizQuestion = normalizeQuizQuestion;
+module.exports.extractWorksheetContent = extractWorksheetContent;
