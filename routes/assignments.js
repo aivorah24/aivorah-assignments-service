@@ -2531,6 +2531,576 @@ router._internal = {
   buildFallbackQuiz, resolveUserId, normaliseWithSubmission,
 };
 
+// -- POST /assignments/generate-ibpyp -- (ported from ai-mentor/server, 2026-09-10)
+router.post('/generate-ibpyp', async (req, res) => {
+  const { topic = '', subject = '', grade = 'Grade 3', curriculum = 'IB PYP', language = '', unitOfInquiry = '' } = req.body;
+  if (!topic.trim()) return res.status(400).json({ error: 'topic required' });
+
+  // ── Step 1: Retrieve relevant curriculum content from Qdrant ──────────────
+  let curriculumContext = '';
+  let sourceChunks = 0;
+  try {
+    const { embed } = require('../services/embeddings');
+    const { searchGrounding } = require('../services/qdrant');
+    const queryText = [subject, topic, grade, curriculum, unitOfInquiry].filter(Boolean).join(' ');
+    const vector = await embed(queryText);
+    // Route to the correct collection + normalise + fall back to the base
+    // curriculum (IB PYP → CBSE/NCERT) so RAG actually grounds instead of the old
+    // "always default NCERT collection → 0 hits → generic content" bug.
+    const { chunks: results, source } = await searchGrounding({
+      vector, curriculum, grade, subject, topic, limit: 6,
+    });
+    sourceChunks = results.length;
+    if (results.length > 0) {
+      console.log(`[generate-ibpyp] grounded on ${results.length} chunks from`, source?.collection, source?.curriculum, source?.grade);
+      curriculumContext = results
+        .map(r => {
+          const p = r.payload || {};
+          return `[${p.subject || subject} > ${p.unit || ''} > ${p.topic || topic}]\n${p.content || p.text || ''}`;
+        })
+        .join('\n\n---\n\n');
+    }
+  } catch (ragErr) {
+    console.warn('[generate-ibpyp] Qdrant retrieval skipped:', ragErr.message);
+  }
+
+  const langNote = subject === 'Language Acquisition' && language
+    ? `TARGET LANGUAGE: ${language}. This is a ${language} acquisition assignment.
+- Write ALL target-language content in ${language}'s native script (e.g. Devanagari for Hindi, Telugu script for Telugu) WITH an English gloss in brackets — not only in the Word Bank, but in the scenario/provocation, sentence starters/frames, and the vocabulary students practise.
+- English is used ONLY for the surrounding instructions/scaffolding a beginner needs to understand the task; every place the STUDENT produces language, it must be ${language}.
+- The Word Bank must contain ${language} words in native script + romanisation + English meaning.
+- NO voice/audio: never ask the student to speak, say aloud, record, or present orally — all responses are written/typed.`
+    : '';
+  const unitNote = unitOfInquiry ? `Unit of Inquiry / Theme: "${unitOfInquiry}"` : '';
+
+  const isIBPYP        = curriculum.toLowerCase().includes('ib');
+  const isNCERT        = curriculum.toLowerCase().includes('ncert') || curriculum.toLowerCase().includes('cbse');
+  const isMaths        = (subject || '').toLowerCase().includes('math');
+  const isScience      = (subject || '').toLowerCase().includes('science');
+  const isEnglish      = subject === 'English';
+  const isLangAcq      = subject === 'Language Acquisition';
+  const isSocialStudies = subject === 'Social Studies';
+  const isArts         = subject === 'Visual Arts';
+  const isICT          = subject === 'ICT';
+  const isPE           = subject === 'Physical Education';
+
+  // ── IB PYP full framework metadata ─────────────────────────────────────
+  const ibFramework = isIBPYP ? `
+IB PYP FRAMEWORK — you MUST follow ALL of these:
+• Transdisciplinary Themes: Who We Are / How We Express Ourselves / How the World Works / How We Organise Ourselves / Sharing the Planet / Where We Are in Place and Time
+• Key Concepts: Form, Function, Causation, Change, Connection, Perspective, Responsibility, Reflection
+• Related Concepts: subject-specific, linked to the key concept
+• Learner Profile: Inquirer, Thinker, Communicator, Knowledgeable, Principled, Open-minded, Caring, Risk-taker, Balanced, Reflective
+• ATL Skills: Thinking / Research / Communication / Social / Self-management
+• Lines of Inquiry: 3 specific inquiry questions students explore within the Central Idea
+• Central Idea: A transferable, conceptual statement (not a topic description) about ${topic}
+• Assessment: Success Criteria in student voice ("I can..."), observable and measurable
+• For MATHEMATICS: IB PYP Math strands are Number, Pattern & Function, Measurement, Shape & Space, Data Handling
+  — ${grade} fraction expectations: understand equal parts of a whole/set, name and write fractions, compare simple fractions, solve word problems with fractions` : '';
+
+  const ncertFramework = isNCERT ? `
+NCERT/CBSE FRAMEWORK — ${grade}:
+• Aligned to NCF (National Curriculum Framework) and NCERT textbook chapter objectives
+• Include HOTS (Higher Order Thinking Skills) questions at the end of problem_solving step
+• Use relatable Indian real-world contexts (sharing rotis, filling water bottles, measuring fabric, etc.)
+• Assessment: Chapter-aligned learning objectives` : '';
+
+  // ── IB PYP subject-specific step design (inquiry-based, not generic) ───
+  // Mapping per IB PYP pedagogy:
+  // Mathematics : tuning_in → problem_solving → math_reflection
+  // Science     : prior_knowledge → drawing (labeled diagram) → structured_writing (conclude)
+  // English     : brainstorm → drawing (illustrate) → structured_writing (narrative/response)
+  // Social Studies: brainstorm → drawing (map/timeline) → structured_writing (reflection)
+  // Lang Acq    : brainstorm → drawing (labeled in target lang) → structured_writing (short paragraph)
+
+  const gradeNum = parseInt((grade || '4').replace(/\D/g,'')) || 4;
+  const gradeAgeNote = gradeNum === 3 ? '8-9 year olds — use simple sentences, 2-3 sentences per section' :
+                       gradeNum === 4 ? '9-10 year olds — 3-5 sentences per section, explain reasoning' :
+                       '10-11 year olds — 1-2 paragraphs, justify with evidence';
+
+  const mathProblemsGuidance = `
+IB PYP MATHEMATICS — problem_solving MUST have REAL calculations with actual numbers:
+${gradeNum === 3 ? `Grade 3 examples for "${topic}":
+- "Colour 1/2 of the shape. How many parts did you colour? __ out of __"
+- "Which is bigger: 1/2 or 1/4? Write > or <"
+- "I ate 2 out of 4 equal slices of a sandwich. What fraction did I eat? __"
+- "Draw a number line and mark: 0, 1/4, 1/2, 3/4, 1"` :
+gradeNum === 4 ? `Grade 4 examples for "${topic}":
+- "3/4 + 1/4 = __  Show your working"
+- "A ribbon is 8 cm long. Sana uses 3/8 of it. How many cm does she use? __"
+- "Order from smallest to largest: 2/3, 1/2, 3/4, 1/3"
+- "A class of 24 students — 1/3 are absent. How many students are present? Show working."` :
+`Grade 5 examples for "${topic}":
+- "Calculate: 2/3 + 3/5 = __ (find common denominator, show working)"
+- "A tank is 4/5 full. It holds 60L when full. How many litres are in it?"
+- "Write 0.75 as a fraction in simplest form. Explain how you got your answer."
+- "Tom scores 18 out of 24. What percentage is this? Show your method."`}
+ALL problems must have actual numbers. NO drawing tasks. Students SOLVE, CALCULATE, COMPARE, EXPLAIN working.`;
+
+  const subjectStepConfig = isMaths ? {
+    step1: {
+      type: 'tuning_in',
+      guidance: `Write ONE real-world SCENARIO (2-3 sentences) connecting ${topic} to a student's daily life — written in full text, NO "look at the image".
+E.g. for fractions: "You and 3 friends order a pizza and want to share it equally so everyone gets a fair piece. How would you cut it? What fraction would each person get? How do you know it is fair?"
+Then ask: "Write your initial thinking — what do you already know about ${topic}? (2-3 sentences)"`,
+      provocation: `A vivid real-world scenario (2-3 sentences) about ${topic} written as full text — no image references`,
+    },
+    step2: {
+      type: 'problem_solving',
+      guidance: `${mathProblemsGuidance}\nCreate EXACTLY 4 problems graduated Easy → Medium → Hard → Word Problem. Each MUST have actual numbers and a clear answer space.`,
+    },
+    step3: {
+      type: 'math_reflection',
+      guidance: `IB PYP Mathematical Reflection — 3 prompts (NOT a story):
+Prompt 1: "Explain the strategy you used. What steps did you follow?" (2-3 sentences)
+Prompt 2: "What was the trickiest part? What would you do differently?" (1-2 sentences)
+Prompt 3: "Where do you see ${topic} in real life? Give a specific example." (1-2 sentences)`,
+      sections: ['My Strategy', 'What Was Tricky', 'Real Life Connection'],
+    },
+    wordBankNote: `Key mathematical vocabulary for ${topic}`,
+
+  } : isScience ? {
+    step1: {
+      type: 'prior_knowledge',
+      guidance: `IB PYP Science Tuning In — two prompts:
+"What do I already know about ${topic}?" (3-4 bullet points of prior knowledge)
+"What do I predict I will discover?" (2-3 sentences with reasoning)`,
+    },
+    step2: {
+      type: 'drawing',
+      guidance: `Scientific diagram — Draw AND LABEL a detailed scientific diagram of ${topic}. Minimum 5 labels using scientific vocabulary from the word bank. Add title, arrows for processes, and a key if applicable.`,
+    },
+    step3: {
+      type: 'structured_writing',
+      guidance: `Scientific conclusion — 3 sections:
+"What I Found Out" (key discovery about ${topic}, 2-3 sentences),
+"My Evidence" (observations/data that support this, 2-3 sentences),
+"Connection to Big Idea" (link to unit's Central Idea, 1-2 sentences).`,
+      sections: ['What I Found Out', 'My Evidence', 'Connection to Big Idea'],
+    },
+    wordBankNote: `Scientific vocabulary specific to ${topic}`,
+
+  } : isEnglish ? {
+    step1: {
+      type: 'text_connection',
+      guidance: `⚠️ TEXT CONNECTION STEP — NOT a brainstorm, NOT keywords. Students read a SHORT TEXT and respond personally.
+Write a SHORT TEXT EXCERPT (3-5 sentences), poem stanza, or vivid descriptive passage IN THE "provocation" FIELD — students will read this directly.
+NO "look at the image" — there are no images. Write the actual text.
+Example for "Friendship": provocation = "Maya sat alone at lunch every day, watching the other kids laugh and play. She wanted to join them but didn't know how to start. One day, a new student named Sam sat down beside her and said, 'I'm new here. Can I sit with you?' Maya felt her whole day change in that moment."
+Instructions MUST ask: "Read the passage above. What do you NOTICE? What does this REMIND you of from your own life? What QUESTIONS does it raise for you? Write 2-3 sentences of your personal connection."`,
+      provocation: `A short readable passage (3-5 sentences), poem stanza, or story moment about ${topic} — written in full text for students to read directly`,
+    },
+    step2: {
+      type: 'reading_comprehension',
+      guidance: `⚠️ READING COMPREHENSION STEP — NOT drawing, NOT keywords. Students ANSWER questions about a text.
+Three sections progressing from literal → inferential → evaluative:
+Section 1 "What Happened?" — 2 LITERAL questions with answer spaces: Who? What? Where? When? (Students write 1-2 sentences per question — facts from the text only)
+Section 2 "Reading Between the Lines" — 2 INFERENTIAL questions: "Why do you think the character did...?", "What does the author mean when they say...?", "What clues in the text tell you...?" (Students infer beyond the words, 2-3 sentences)
+Section 3 "My Thinking" — 1 EVALUATIVE question: "Do you agree with...? Why?", "What is the author's message?", "What would YOU do if...?" (Personal response with text evidence, 2-3 sentences)
+${gradeAgeNote}. Questions must be SPECIFIC to ${topic} — not generic.`,
+      sections: ['What Happened?', 'Reading Between the Lines', 'My Thinking'],
+    },
+    step3: {
+      type: 'writing_reflection',
+      guidance: `⚠️ WRITING REFLECTION STEP — 3 specific IB-style prompts, NOT "write a story".
+Prompt 1 (sections[0] = "Most Important Idea"): "What is the most important idea or message from this text about ${topic}? Use evidence from the text to explain why." (2-3 sentences with text reference)
+Prompt 2 (sections[1] = "Connection to Our Unit"): "How does this text connect to our unit's Central Idea? Give ONE specific example." (2 sentences)
+Prompt 3 (sections[2] = "My Question for the Author"): "If you could ask the author ONE question about ${topic}, what would it be? Explain why you want to know this." (2 sentences)`,
+      sections: ['Most Important Idea', 'Connection to Our Unit', 'My Question for the Author'],
+    },
+    wordBankNote: `Literary vocabulary for ${topic}: key words from the text, literary devices, emotional/character vocabulary`,
+
+  } : isLangAcq ? {
+    step1: {
+      type: 'language_culture',
+      guidance: `⚠️ LANGUAGE & CULTURE STEP — NOT a brainstorm of English words. Cultural hook written as TEXT — no image references.
+Write a vivid TEXT DESCRIPTION of a cultural scenario, festival, food, tradition, or song lyric from the target language culture related to ${topic} in the "provocation" field — students read this directly. NO "look at the image".
+Example for Hindi/Holi: provocation = "In India, people celebrate Holi — the festival of colours! Families and friends throw coloured powder at each other, sing songs, and eat sweet gujiyas. The word for colour in Hindi is रंग (rang). Joy is खुशी (khushi). Can you think of a festival in your culture that celebrates colour or happiness?"
+Instructions MUST ask: "Read about this cultural tradition. Write 3-5 words you already know in the target language about ${topic} (with English meanings in brackets). What are you curious to learn?"`,
+      provocation: `A vivid written description of a cultural tradition, festival, food, or story from the target language culture connected to ${topic} — full text, no image references`,
+    },
+    step2: {
+      type: 'language_practice',
+      guidance: `⚠️ LANGUAGE PRACTICE STEP — Students USE the target language. NOT English writing, NOT drawing.
+Section 1 "Vocabulary Practice": List 5 target language words/phrases for ${topic} with English meanings. Students write ONE sentence in the target language using each word. Use scaffolded sentence starters in the target language.
+Section 2 "My Sentences": Write 4-5 sentences IN THE TARGET LANGUAGE describing ${topic}. Provide sentence frames: e.g. "मेरा _______ है।" (My _______ is.). Students fill in and extend.
+Section 3 "Cultural Connection": ONE written sentence in the target language (with a short English gloss in brackets) comparing how ${topic} is expressed in the target language culture vs their own culture.
+${gradeAgeNote}. Every instruction must push students to produce TARGET LANGUAGE output, IN WRITING (this platform has NO voice/audio input — never ask students to "speak", "say aloud", or "record").`,
+      sections: ['Vocabulary Practice', 'My Sentences', 'Cultural Connection'],
+    },
+    step3: {
+      type: 'communication',
+      guidance: `⚠️ COMMUNICATION STEP — Students PRODUCE language IN WRITING (this platform has NO voice/audio input — never ask them to "speak", "say aloud", "record" or "present orally"; all responses are typed/written). 3 specific prompts:
+Prompt 1 (sections[0] = "My Paragraph"): "Write a short paragraph (3-4 sentences) IN THE TARGET LANGUAGE about ${topic}. Use at least 5 words from the word bank. You may use sentence starters provided." (Must specify sentence starters in target language)
+Prompt 2 (sections[1] = "Favourite Word or Phrase"): "What was the most interesting or fun word/phrase you learned in this lesson? Write it, its meaning, and WHY you like it." (English okay)
+Prompt 3 (sections[2] = "Cultural Comparison"): "How is ${topic} similar or different in the target language culture compared to your culture? Give one specific example." (1-2 sentences)`,
+      sections: ['My Paragraph', 'Favourite Word or Phrase', 'Cultural Comparison'],
+    },
+    wordBankNote: `Target language vocabulary WITH English translations and romanisation/transliteration for ${topic} — include 6-8 words`,
+
+  } : isSocialStudies ? {
+    step1: {
+      type: 'social_inquiry',
+      guidance: `⚠️ SOCIAL INQUIRY STEP — NOT a brainstorm, NOT keywords, NOT drawing.
+This is a TEXT-BASED PROVOCATION written directly for students to read — NO references to images or photos (there are no images in the app).
+Write ONE vivid real-world scenario or essential question IN FULL TEXT that students can read and respond to.
+REQUIRED in the "provocation" field: Write the actual scenario/question text e.g. "Imagine you are walking through two different neighbourhoods — one is a busy city street with tall buildings and shops, the other is a quiet village with open fields and a small market. What would be the same about the people's lives? What would be different? What questions do you have?"
+REQUIRED in instructions: "Read the scenario above. What do you NOTICE? What do you WONDER? What do you already KNOW about ${topic}? Write 2-3 observations and 1-2 questions."
+DO NOT say "Look at the image" or "Look at the photo" — there are NO images. Write the scenario fully in text.`,
+      provocation: `A vivid written scenario or essential question about ${topic} — written as full text, no image references`,
+    },
+    step2: {
+      type: 'research_notes',
+      guidance: `⚠️ RESEARCH NOTES STEP — NOT a drawing task, NOT a map, NOT a creative activity.
+Students READ, RESEARCH, and RECORD structured notes in THREE sections:
+Section 1 "Key Facts": Write 4-5 specific facts about ${topic} answering Who? What? Where? When? Use bullet points.
+Section 2 "People and Perspectives": How do at least 2 different groups of people experience ${topic}? Compare their perspectives. (3-4 sentences)
+Section 3 "Cause and Effect": What caused ${topic}? What are its effects on people/places? (2-3 bullets for cause, 2-3 for effects)
+${gradeAgeNote}.
+IMPORTANT: instructions must tell students to USE textbooks, videos, or classroom resources to find information — this is RESEARCH, not creative work.`,
+      sections: ['Key Facts', 'People and Perspectives', 'Cause and Effect'],
+    },
+    step3: {
+      type: 'social_synthesis',
+      guidance: `⚠️ SOCIAL SYNTHESIS STEP — NOT generic reflection, NOT "write what you liked".
+Three SPECIFIC IB PYP reflection prompts:
+Prompt 1 (sections[0] = "What I Learned and Why It Matters"): "What is the most important thing you learned about ${topic}? Explain WHY it matters to people in the world." (2-3 sentences)
+Prompt 2 (sections[1] = "Connection to Our World"): "How does ${topic} connect to our unit's Central Idea? Give a specific real-world example from today." (2 sentences)
+Prompt 3 (sections[2] = "Taking Action"): "What is ONE action YOU could take in your school or community because of what you learned about ${topic}?" (1-2 sentences — IB Taking Action)`,
+      sections: ['What I Learned and Why It Matters', 'Connection to Our World', 'Taking Action'],
+    },
+    wordBankNote: `Social studies vocabulary specific to ${topic}: geography, history, culture, civics, economic terms`,
+
+  } : isArts ? {
+    step1: {
+      type: 'artistic_exploration',
+      guidance: `⚠️ ARTISTIC EXPLORATION STEP — Write a VERBAL DESCRIPTION of an artwork — DO NOT say "look at the image" (no images in the app).
+In the "provocation" field: Write a detailed verbal description of a REAL named artwork or artist related to ${topic} so students can visualise it mentally.
+Example: "Pablo Picasso painted 'Guernica' in black, white, and grey. It shows twisted figures of people, animals, and a broken sword. The shapes are jagged and sharp. The faces show pain and fear. Picasso painted this to protest against war and violence."
+Instructions MUST ask: "Read the description above and close your eyes — picture this artwork in your mind. List 5 things you can visualise. What MOOD or FEELING does it create? What technique or colour will YOU use in your own artwork inspired by ${topic}?"
+Name a REAL artist and artwork. Write the description richly enough that students can imagine it.`,
+      provocation: `A detailed verbal description of a real named artwork (artist + title + what it shows) related to ${topic} — no image references`,
+    },
+    step2: {
+      type: 'art_creation',
+      guidance: `⚠️ ART CREATION STEP — Students MAKE something. Instructions must specify:
+1. WHAT to create: (e.g. "Create an abstract painting using warm colours to show the emotion of joy")
+2. TECHNIQUE/ELEMENT to focus on: (e.g. colour mixing, line variation, texture, composition rule of thirds)
+3. CONNECTION to ${topic} and Central Idea: how their artwork reflects the unit theme
+4. PROCESS documentation: "Write your title, materials used, and date on the back of your work"
+5. UPLOAD: "Take a clear photo of your finished artwork and upload it here"
+Instructions must be specific — not "create something about ${topic}" but exactly what medium, technique, and concept to explore.`,
+    },
+    step3: {
+      type: 'artistic_reflection',
+      guidance: `⚠️ ARTISTIC REFLECTION / ARTIST STATEMENT — 3 specific prompts:
+Prompt 1 (sections[0] = "About My Artwork"): "Describe what you created — what materials and techniques did you use? What element of art did you focus on?" (2-3 sentences)
+Prompt 2 (sections[1] = "What I Was Trying to Express"): "What idea, feeling, or message were you trying to communicate? How does your artwork connect to ${topic}?" (2-3 sentences)
+Prompt 3 (sections[2] = "Challenges and Improvements"): "What was the most challenging part of creating this? If you could change one thing, what would it be and why?" (1-2 sentences)`,
+      sections: ['About My Artwork', 'What I Was Trying to Express', 'Challenges and Improvements'],
+    },
+    wordBankNote: `Visual arts vocabulary: elements of art (line, colour, shape, texture, form, space, value), composition, technique, medium — specific to ${topic}`,
+
+  } : isICT ? {
+    step1: {
+      type: 'digital_awareness',
+      guidance: `⚠️ DIGITAL AWARENESS STEP — Write a TEXT-BASED real-world scenario. NO "look at the image" — there are no images.
+In the "provocation" field: Write a specific relatable digital story/situation students can read.
+Example for "Internet Safety": "Riya is 9 years old. She is playing an online game when a stranger called 'CoolGamer99' messages her: 'You are so good at this! Add me and I will give you extra points.' Riya does not know this person in real life. What should she do? What would YOU do?"
+Example for "Coding": "Your school wants a robot that sorts rubbish into recycling bins. You are the programmer. What instructions would the robot need? What problems might it face?"
+Instructions MUST ask: "Read the scenario above. What do you already KNOW about ${topic}? What do you WONDER? What does being responsible look like? Write 3-4 sentences."`,
+      provocation: `A specific relatable digital scenario written as a short story/situation for ${topic} — full text, no image references`,
+    },
+    step2: {
+      type: 'tech_skill_practice',
+      guidance: `⚠️ TECH SKILL PRACTICE STEP — NOT a drawing, NOT generic writing. Students DO a digital task.
+Section 1 "Step-by-Step Task": Give SPECIFIC numbered steps for a digital activity (e.g. "1. Open Google Docs. 2. Create a new document titled '${topic}'. 3. Write 3 paragraphs about... 4. Add an image by..."). Must be specific enough to follow.
+Section 2 "My Digital Creation": "Describe what you created. What tool/software did you use? What did you include?" Students describe their finished digital product.
+Section 3 "How I Checked My Sources": "Name 2 websites you used. How did you check they were reliable? What clues showed it was a trustworthy source?" (Grade 4-5 source evaluation)
+${gradeAgeNote}.`,
+      sections: ['Step-by-Step Task', 'My Digital Creation', 'How I Checked My Sources'],
+    },
+    step3: {
+      type: 'digital_citizenship',
+      guidance: `⚠️ DIGITAL CITIZENSHIP REFLECTION — 3 specific prompts:
+Prompt 1 (sections[0] = "What I Learned to Do"): "What digital skill did you practise? Describe step-by-step what you did and what you learned to do." (2-3 sentences)
+Prompt 2 (sections[1] = "Being a Responsible Digital Citizen"): "Give 2 SPECIFIC examples of how you can use this technology safely and responsibly." (2 sentences with real examples)
+Prompt 3 (sections[2] = "Technology for Good"): "How could this technology or digital skill help solve a real problem in your school or community? Describe one specific idea." (1-2 sentences)`,
+      sections: ['What I Learned to Do', 'Being a Responsible Digital Citizen', 'Technology for Good'],
+    },
+    wordBankNote: `Digital literacy vocabulary: specific to ${topic} — e.g. algorithm, browser, digital footprint, cyberbullying, source, reliable, password, privacy`,
+
+  } : isPE ? {
+    step1: {
+      type: 'movement_exploration',
+      guidance: `⚠️ MOVEMENT EXPLORATION STEP — Write a TEXT-BASED scenario. NO "look at the image" — no images in the app.
+In the "provocation" field: Write a vivid real-world sport/movement scenario students can read and relate to.
+Example for "Throwing and Catching": "Imagine you are the goalkeeper in the final minute of a football match. The ball is coming fast. Your whole team is counting on you. What does your body need to do in that split second? Stand up and try the catching position right now — hands up, eyes on the target. What feels natural? What feels tricky?"
+Instructions MUST ask: "Read the scenario above. What do you already KNOW about ${topic}? Why is this skill important for your body and health? What do you PREDICT will be easy or challenging for you? Write 3-4 sentences."
+NO "watch the demonstration" — this is a WRITTEN assignment response.`,
+      provocation: `A vivid sport/movement scenario written as a relatable real-world situation for ${topic} — full text, no image references`,
+    },
+    step2: {
+      type: 'skill_practice',
+      guidance: `⚠️ SKILL PRACTICE STEP — Structured record of physical practice. NOT a drawing.
+Section 1 "Key Skill Steps": List 3-4 SPECIFIC technique steps for ${topic} (e.g. for throwing: "1. Stand side-on to target 2. Step forward with opposite foot 3. Pull arm back 4. Release and follow through"). Use action verbs.
+Section 2 "My Practice Record": "How many times did you practise? What specific part did you work on? What improvement did you notice?" Students record their actual practice data.
+Section 3 "Teamwork and Fairness": "How did you encourage or support a classmate? What does fair play look like in ${topic}? Give one specific example from today." (2 sentences)
+${gradeAgeNote}.`,
+      sections: ['Key Skill Steps', 'My Practice Record', 'Teamwork and Fairness'],
+    },
+    step3: {
+      type: 'physical_reflection',
+      guidance: `⚠️ PHYSICAL REFLECTION — Goal-setting and health connection. 3 specific prompts:
+Prompt 1 (sections[0] = "What I Did Well"): "What specific aspect of ${topic} did you do well today? What evidence do you have that you improved?" (2 sentences — specific, not "I did good")
+Prompt 2 (sections[1] = "My Next Step"): "What ONE specific skill or technique will you practise next time? Describe exactly HOW you will practise it." (2 sentences — must have a concrete action)
+Prompt 3 (sections[2] = "Health and Wellbeing Connection"): "How does practising ${topic} benefit your body and overall wellbeing? How will you include this kind of activity in your life outside school?" (1-2 sentences)`,
+      sections: ['What I Did Well', 'My Next Step', 'Health and Wellbeing Connection'],
+    },
+    wordBankNote: `Physical education vocabulary specific to ${topic}: technique terms, body parts, movement words, sport-specific vocabulary, health/fitness terms`,
+
+  } : {
+    // Fallback for any unrecognised subject
+    step1: { type: 'brainstorm', guidance: `Prior knowledge activation — what do students already know about ${topic}?` },
+    step2: { type: 'drawing', guidance: `Visual representation of ${topic} with labels.` },
+    step3: { type: 'structured_writing', guidance: `Structured written response about ${topic}.`, sections: ['Beginning', 'Middle', 'End'] },
+    wordBankNote: `Key vocabulary for ${topic} in ${subject}`,
+  };
+
+
+  const step1Type = subjectStepConfig.step1.type;
+  const step2Type = subjectStepConfig.step2.type;
+  const step3Type = subjectStepConfig.step3?.type || 'structured_writing';
+  const step3Sections = subjectStepConfig.step3?.sections || ['Beginning', 'Middle', 'End'];
+
+  const problemsField = step2Type === 'problem_solving'
+    ? `,\n      "problems": ["[Easy: actual calculation with numbers]", "[Medium: multi-step with numbers]", "[Hard: reasoning with numbers]", "[Word problem in real-life context with numbers]"]`
+    : '';
+
+  const step3SectionsField = `"sections": ${JSON.stringify(step3Sections)}`;
+
+  const prompt = `You are an expert IB PYP curriculum designer and experienced ${grade} ${subject} teacher.
+Generate a REAL, classroom-ready IB PYP assignment. Think like an actual ${grade} ${subject} teacher who deeply understands IB PYP pedagogy.
+
+ASSIGNMENT DETAILS:
+• Topic: "${topic}"
+• Subject: ${subject || 'General'}
+• Grade: ${grade} (${gradeAgeNote})
+• Curriculum: ${curriculum}
+${unitNote ? '• Unit of Inquiry: ' + unitNote + '\n' : ''}${langNote ? '• Language: ' + langNote + '\n' : ''}
+
+${ibFramework}
+${ncertFramework}
+${curriculumContext ? `\nCURRICULUM CONTENT — use this to ground tasks in real curriculum material:\n${curriculumContext}\n---\n` : ''}
+
+IB PYP ASSIGNMENT STRUCTURE FOR ${subject.toUpperCase()}:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 TYPE: "${step1Type}"
+${subjectStepConfig.step1.guidance}
+
+STEP 2 TYPE: "${step2Type}"
+${subjectStepConfig.step2.guidance}
+
+STEP 3 TYPE: "${step3Type}"
+${subjectStepConfig.step3.guidance}
+
+WORD BANK: ${subjectStepConfig.wordBankNote}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+IB PYP MARKING RUBRIC (4 levels — use this to write success criteria):
+• Exemplary (4): Deep conceptual understanding, accurate, explains thinking clearly, real-world connection
+• Accomplished (3): Good understanding, mostly accurate, some explanation
+• Developing (2): Partial understanding, some errors, limited explanation
+• Beginning (1): Limited understanding, significant errors, needs support
+
+Return ONLY valid JSON:
+{
+  "purpose": "[IB PYP Central Idea as a transferable conceptual statement — NOT a topic description. Then 1 sentence on what students will do. e.g. 'Fractions help us describe and share quantities fairly in everyday life. Students will explore, calculate and apply fractions through real-world problems and mathematical reflection.']",
+  "ibMetadata": {
+    "centralIdea": "[One transferable conceptual statement about ${topic}]",
+    "linesOfInquiry": ["[How does ${topic} connect to our daily lives?]", "[What patterns and relationships exist in ${topic}?]", "[How do we apply ${topic} to solve real problems?]"],
+    "learnerProfile": "[Most relevant: Thinker / Inquirer / Communicator / Knowledgeable / Risk-taker / Reflective / etc.]",
+    "atlSkill": "[Most relevant: Thinking / Research / Communication / Social / Self-management]",
+    "keyConcept": "[Most relevant: Form / Function / Causation / Change / Connection / Perspective / Responsibility / Reflection]"
+  },
+  "learningOutcomes": [
+    "Students will be able to [verb] [specific skill] in the context of ${topic}",
+    "Students will be able to [verb] [specific skill] in the context of ${topic}",
+    "Students will be able to [verb] [specific skill] in the context of ${topic}"
+  ],
+  "taskSteps": [
+    {
+      "type": "${step1Type}",
+      "label": "[3-5 word engaging label for this step]",
+      "instructions": "[Exact instructions for step 1 — specific, age-appropriate, engaging for ${grade}.]"${['tuning_in','text_connection','social_inquiry','language_culture','artistic_exploration','digital_awareness','movement_exploration'].includes(step1Type) ? ',\n      "provocation": "[The real-world scenario, question, image description, or cultural hook]"' : ''}
+    },
+    {
+      "type": "${step2Type}",
+      "label": "[3-5 word engaging label for this step]",
+      "instructions": "[Exact instructions for step 2. ${step2Type === 'problem_solving' ? 'Tell students to solve all 4 problems and show their working.' : step2Type === 'drawing' || step2Type === 'art_creation' ? 'What exactly to create or draw and what to label or include.' : 'Specific step-by-step instructions for ' + step2Type + '.'}]"${problemsField}${step2Type === 'reading_comprehension' || step2Type === 'research_notes' || step2Type === 'language_practice' || step2Type === 'tech_skill_practice' || step2Type === 'skill_practice' ? `,\n      "sections": ${JSON.stringify(subjectStepConfig.step2.sections || [])}` : ''}
+    },
+    {
+      "type": "${step3Type}",
+      "label": "[3-5 word engaging label for this step]",
+      "instructions": "[Exact instructions for step 3. Tell students to answer each prompt thoughtfully in 2-3 sentences.]",
+      ${step3SectionsField}${['math_reflection','writing_reflection','social_synthesis','communication','artistic_reflection','digital_citizenship','physical_reflection'].includes(step3Type) ? `,\n      "reflectionPrompts": ["[Prompt 1 — from the guidance above]", "[Prompt 2]", "[Prompt 3]"]` : ''}
+    }
+  ],
+  "successCriteria": [
+    "I can [observable criterion — student voice, measurable, specific to ${topic}]",
+    "I can [observable criterion — student voice, measurable, specific to ${topic}]",
+    "I can [observable criterion — student voice, measurable, specific to ${topic}]",
+    "I can [observable criterion — student voice, measurable, specific to ${topic}]"
+  ],
+  "wordBank": ["word1", "word2", "word3", "word4", "word5", "word6"],
+  "stamps": ["[IB-aligned achievement title 1]", "[IB-aligned achievement title 2]", "[IB-aligned achievement title 3]"]
+}
+
+ABSOLUTE RULES — violation = wrong output:
+1. Step types MUST be exactly: "${step1Type}", "${step2Type}", "${step3Type}" — no substitutions allowed
+2. ${step2Type === 'problem_solving' ? 'problems[] MUST have 4 real calculation problems with ACTUAL NUMBERS — no drawing, no conceptual descriptions' : step2Type === 'drawing' || step2Type === 'art_creation' ? 'Specify exactly what to create/draw and what to label — make it subject-specific' : 'Step 2 sections must match: ' + JSON.stringify(subjectStepConfig.step2.sections || [])}
+3. Step 3 sections MUST be: ${JSON.stringify(step3Sections)} — do NOT use generic "Beginning/Middle/End" unless it is English subject
+4. centralIdea = a transferable conceptual statement — NOT a topic title, NOT "students will learn X"
+5. successCriteria MUST start with "I can" — observable, measurable, specific to ${topic}
+6. wordBank = 6 real subject-specific vocabulary words for ${topic} — NOT placeholders like "word1"
+7. Return ONLY valid JSON — no markdown, no explanation outside the JSON`;
+
+  const STRICT_RULES_PLACEHOLDER = ''; // absorbed above
+  const STRICT_RULES = '';  // no longer needed below
+  try {
+    // Primary model, then fall back to a lighter model on rate-limit / failure so
+    // generation never dead-ends on a blank screen when the 70B daily token cap
+    // (Groq 429 "tokens per day") is hit — the 8B model has its own token budget.
+    const genWithModel = (model) => groq.chat.completions.create({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.5,
+      max_tokens: 1800,
+      response_format: { type: 'json_object' },
+    });
+    let completion;
+    try {
+      completion = await genWithModel('openai/gpt-oss-120b');
+    } catch (primaryErr) {
+      console.warn('[generate-ibpyp] primary model failed, falling back to 8B:', primaryErr.status || '', primaryErr.message);
+      completion = await genWithModel('llama-3.1-8b-instant');
+    }
+    const raw = completion.choices[0]?.message?.content || '{}';
+    const parsed = JSON.parse(raw);
+    if (!parsed.purpose) return res.status(500).json({ error: 'AI returned invalid structure' });
+
+    // Normalise taskSteps — enforce subject-specific types regardless of what AI returned
+    const rawSteps = Array.isArray(parsed.taskSteps) ? parsed.taskSteps : [];
+
+    // Full 3-step enforcement maps per subject (IB PYP Kath Murdoch inquiry cycle)
+    const stepTypeMap =
+      isMaths         ? ['tuning_in',          'problem_solving',    'math_reflection']    :
+      isScience        ? ['prior_knowledge',     'drawing',            'structured_writing'] :
+      isEnglish        ? ['text_connection',     'reading_comprehension', 'writing_reflection'] :
+      // Communication (the voice/oral-style step) is intentionally dropped for
+      // Language Acquisition — this platform has no audio input, so a language
+      // assignment is just Culture + written Practice. (2026-07-22)
+      isLangAcq        ? ['language_culture',    'language_practice']                        :
+      isSocialStudies  ? ['social_inquiry',      'research_notes',     'social_synthesis']   :
+      isArts           ? ['artistic_exploration','art_creation',       'artistic_reflection'] :
+      isICT            ? ['digital_awareness',   'tech_skill_practice','digital_citizenship'] :
+      isPE             ? ['movement_exploration','skill_practice',     'physical_reflection'] :
+                         ['brainstorm',          'drawing',            'structured_writing'];
+
+    // Language Acquisition = 2 steps (no Communication); everything else = 3.
+    const numSteps = isLangAcq ? 2 : 3;
+    const taskSteps = rawSteps.slice(0, numSteps).map((s, idx) => {
+      const enforcedType = stepTypeMap[idx] || s.type || 'brainstorm';
+
+      // Default sections per step type
+      // Default sections per step type (fallback if AI omits them)
+      const SECTION_DEFAULTS = {
+        structured_writing:    isScience ? ['What I Found Out', 'My Evidence', 'Connection to Big Idea'] : ['Beginning', 'Middle', 'End'],
+        math_reflection:       ['My Strategy', 'What Was Tricky', 'Real Life Connection'],
+        prior_knowledge:       ['What I Already Know', 'What I Predict'],
+        reading_comprehension: ['What Happened?', 'Reading Between the Lines', 'My Thinking'],
+        research_notes:        ['Key Facts', 'People and Perspectives', 'Cause and Effect'],
+        language_practice:     ['Vocabulary Practice', 'My Sentences', 'Cultural Connection'],
+        tech_skill_practice:   ['Step-by-Step Task', 'My Digital Creation', 'How I Checked My Sources'],
+        skill_practice:        ['Key Skill Steps', 'My Practice Record', 'Teamwork and Fairness'],
+        writing_reflection:    ['Most Important Idea', 'Connection to Our Unit', 'My Question for the Author'],
+        social_synthesis:      ['What I Learned and Why It Matters', 'Connection to Our World', 'Taking Action'],
+        communication:         ['My Paragraph', 'Favourite Word or Phrase', 'Cultural Comparison'],
+        artistic_reflection:   ['About My Artwork', 'What I Was Trying to Express', 'Challenges and Improvements'],
+        digital_citizenship:   ['What I Learned to Do', 'Being a Responsible Digital Citizen', 'Technology for Good'],
+        physical_reflection:   ['What I Did Well', 'My Next Step', 'Health and Wellbeing Connection'],
+      };
+      const sections = Array.isArray(s.sections) && s.sections.length > 0
+        ? s.sections
+        : (SECTION_DEFAULTS[enforcedType] || []);
+
+      // Default reflection prompts per reflection step type
+      const REFLECTION_DEFAULTS = {
+        math_reflection:     [`Explain the strategy you used to solve the ${topic} problems.`, `What was the trickiest part and how did you figure it out?`, `Where do you see ${topic} in real life?`],
+        writing_reflection:  [`What is the most important idea from this text? Why?`, `How does this text connect to our unit's Central Idea?`, `If you could ask the author one question, what would it be?`],
+        social_synthesis:    [`What is the most important thing you learned about ${topic}? Why does it matter?`, `How does ${topic} connect to our Central Idea and the world today?`, `What action could you or your community take because of what you learned?`],
+        communication:       [`Write a short paragraph in the target language describing ${topic}.`, `What was the most interesting word or phrase you learned?`, `How is ${topic} discussed differently in the target language culture?`],
+        artistic_reflection: [`Describe your artwork — what did you create and what materials did you use?`, `What were you trying to express? How does it connect to ${topic}?`, `What was challenging? What would you change or improve?`],
+        digital_citizenship: [`What digital skill did you practise? What did you learn?`, `How can you use this technology responsibly? Give 2 examples.`, `How could this technology help solve a real problem in your community?`],
+        physical_reflection: [`What did you do well? What improved since you started?`, `What was challenging? What will you practise next time?`, `How does ${topic} help your body and health? How will you keep this habit?`],
+      };
+      const reflectionPrompts = ['math_reflection','writing_reflection','social_synthesis','communication','artistic_reflection','digital_citizenship','physical_reflection'].includes(enforcedType)
+        ? (Array.isArray(s.reflectionPrompts) && s.reflectionPrompts.length > 0 ? s.reflectionPrompts : (REFLECTION_DEFAULTS[enforcedType] || []))
+        : [];
+
+      // Hook step types — pass through provocation field
+      const isHookStep = ['tuning_in','text_connection','social_inquiry','language_culture','artistic_exploration','digital_awareness','movement_exploration'].includes(enforcedType);
+
+      // Word bank: use step-level if AI provided it, else share the top-level word bank
+      const stepWordBank = Array.isArray(s.wordBank) && s.wordBank.length > 0
+        ? s.wordBank
+        : (Array.isArray(parsed.wordBank) && parsed.wordBank.length > 0 ? parsed.wordBank : []);
+
+      return {
+        type:              enforcedType,
+        label:             s.label || enforcedType.replace(/_/g,' ') || '',
+        instructions:      s.instructions || '',
+        provocation:       isHookStep ? (s.provocation || '') : undefined,
+        sections,
+        problems:          enforcedType === 'problem_solving'
+          ? (Array.isArray(s.problems) && s.problems.length > 0 ? s.problems : generateFallbackProblems(s.label || topic, grade))
+          : [],
+        reflectionPrompts,
+        wordBank:          stepWordBank,
+      };
+    });
+
+    // Extract IB PYP metadata if present
+    const ibMeta = parsed.ibMetadata || {};
+
+    res.json({
+      purpose:          parsed.purpose || '',
+      learningOutcomes: Array.isArray(parsed.learningOutcomes) ? parsed.learningOutcomes : [],
+      taskSteps,
+      successCriteria:  Array.isArray(parsed.successCriteria) ? parsed.successCriteria : [],
+      wordBank:         Array.isArray(parsed.wordBank) ? parsed.wordBank : [],
+      stamps:           Array.isArray(parsed.stamps) ? parsed.stamps : [],
+      sourceChunks,
+      // IB PYP framework fields
+      centralIdea:      ibMeta.centralIdea || '',
+      linesOfInquiry:   Array.isArray(ibMeta.linesOfInquiry) ? ibMeta.linesOfInquiry : [],
+      learnerProfile:   ibMeta.learnerProfile || '',
+      atlSkill:         ibMeta.atlSkill || '',
+      keyConcept:       ibMeta.keyConcept || '',
+    });
+  } catch (err) {
+    // Surface a clear, user-facing message (never a blank screen). A Groq daily
+    // token cap survives even the 8B fallback → tell the teacher to retry later.
+    const isRateLimit = err.status === 429 || /rate.?limit|tokens per day/i.test(err.message || '');
+    console.error('[generate-ibpyp] error:', err.status || '', err.message);
+    res.status(isRateLimit ? 429 : 500).json({
+      error: isRateLimit
+        ? 'The AI is busy right now (daily generation limit reached). Please try again in a little while.'
+        : (err.message || 'IB generation failed. Please try again.'),
+    });
+  }
+});
+
 module.exports = router;
 module.exports.normalizeQuizQuestion = normalizeQuizQuestion;
 module.exports.extractWorksheetContent = extractWorksheetContent;
