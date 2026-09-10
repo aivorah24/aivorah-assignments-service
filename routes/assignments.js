@@ -38,10 +38,17 @@ const express    = require('express');
 const router     = express.Router();
 const supabase   = require('../services/supabase');
 const Groq       = require('groq-sdk');
+const cloudinary = require('cloudinary').v2;
 const crypto     = require('crypto');
 const { renderQuizHTML } = require('../utils/quizHtmlRenderer');
+const { resolveCorrectFromScore } = require('../utils/grading');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
 const MCQ_LETTER_TO_INDEX = { A: 0, B: 1, C: 2, D: 3 };
 
 // ── normalise() live-HTML-regen support (see routes/assignments.js:14-34) ──
@@ -298,6 +305,23 @@ function normalizeQuizQuestion(question, index) {
     };
   }
 
+  // B04: drawing/photo — an explicit pass-through case, same shape as
+  // fill_blank (no options required). Without this, a drawing/photo
+  // question falls into the generic MCQ branch below, which requires
+  // exactly 4 options and silently returns null (dropped) for anything
+  // without them - the same dead-code trap B03 found for short_answer.
+  if (question.type === 'drawing' || question.type === 'photo') {
+    return {
+      id: String(question.id || `q${index + 1}`),
+      question: prompt,
+      type: question.type,
+      options: [],
+      correct: question.correct ? String(question.correct) : '',
+      hint: question.hint ? String(question.hint) : '',
+      explanation: question.explanation ? String(question.explanation) : '',
+    };
+  }
+
   const options = Array.isArray(question.options)
     ? question.options.map(opt => stripOptionPrefix(opt)).filter(Boolean).slice(0, 4)
     : [];
@@ -326,6 +350,74 @@ function normalizeQuizQuestions(items = [], count = null) {
   if (count == null) return normalized;
   const safeCount = normalizeQuizCount(count, 5);
   return normalized.slice(0, safeCount);
+}
+
+// B04 shared helpers — used by BOTH the scaffolded stepAnswers drawing/photo
+// branch and the quiz-answer drawing/photo branch, so there is exactly one
+// implementation of "upload evidence" and "grade an image submission",
+// not a second copy-pasted one per submission format.
+
+// Uploads the student's original drawing/photo BEFORE grading so it remains
+// accessible for teacher/audit review afterward. Upload failure must never
+// block grading (the caller already has the image in-memory for the vision
+// call) - returns null on failure rather than throwing.
+async function uploadSubmissionEvidence({ imageB64, imageMimeVal, id, studentId, label }) {
+  try {
+    const evidenceUpload = await cloudinary.uploader.upload(`data:${imageMimeVal};base64,${imageB64}`, {
+      folder: 'aivorah/submission_evidence',
+      public_id: `${id}_${studentId}_${label}_${Date.now()}`,
+      resource_type: 'image',
+    });
+    return evidenceUpload.secure_url;
+  } catch (uploadErr) {
+    console.error(`[submit] evidence upload failed for ${label}:`, uploadErr.message);
+    return null;
+  }
+}
+
+// Calls the vision model on the given contentParts (a text prompt + one or
+// more image_url parts) and returns a graded result. On any failure (bad AI
+// response, parse error, API error) returns an explicit needsReview state -
+// score stays null so it can never be mistaken for a real AI-assigned score.
+async function gradeVisionSubmission({ contentParts, gibberishCheckText }) {
+  try {
+    const model = contentParts.some(p => p.type === 'image_url')
+      ? 'meta-llama/llama-4-maverick-17b-128e-instruct'
+      : 'openai/gpt-oss-120b';
+    const completion = await groq.chat.completions.create({
+      model,
+      messages: [{ role: 'user', content: contentParts.length === 1 ? contentParts[0].text : contentParts }],
+      ...(model === 'openai/gpt-oss-120b' ? { response_format: { type: 'json_object' } } : {}),
+    });
+    const raw = completion.choices[0].message.content.replace(/```json[\s\S]*?```|```/g, '').trim();
+    const result = JSON.parse(raw);
+    let score = Math.max(0, Math.min(100, Number(result.score) || 0));
+    // Safety net: if the actual answer is gibberish/random characters, force
+    // a hard 0 - a teacher gives no marks for keyboard-mashing, even if the
+    // AI was lenient.
+    const isGibberish = isGibberishAnswer(gibberishCheckText) || gibberishDescribed(result.studentAnswer) || gibberishDescribed(result.comment);
+    if (isGibberish) score = 0;
+    return {
+      answered: !!result.answered,
+      score,
+      studentAnswer: result.studentAnswer || null,
+      correct: isGibberish ? false : resolveCorrectFromScore(score),
+      comment: result.comment || '',
+      teacherNote: result.teacherNote || '',
+      needsReview: false,
+    };
+  } catch (e) {
+    console.error('Vision grading error:', e.message);
+    return {
+      answered: true,
+      score: null,
+      studentAnswer: null,
+      correct: false,
+      comment: 'Could not fully read this submission - your teacher will review it.',
+      teacherNote: 'AI grading failed (parse/API error) - needs manual review.',
+      needsReview: true,
+    };
+  }
 }
 
 function randInt(min, max) {
@@ -1015,7 +1107,8 @@ router.post('/:id/submit', async (req, res) => {
               response_format: { type: 'json_object' },
             });
             const r = JSON.parse(comp.choices[0].message.content);
-            return { number: i+1, question: qText, answered: true, score: Math.max(0, Math.min(100, Number(r.score)||0)), correct: !!r.correct, studentAnswer: studentAns, comment: r.comment || 'Good effort!' };
+            const clampedScore = Math.max(0, Math.min(100, Number(r.score)||0));
+            return { number: i+1, question: qText, answered: true, score: clampedScore, correct: resolveCorrectFromScore(clampedScore), studentAnswer: studentAns, comment: r.comment || 'Good effort!' };
           } catch {
             return { number: i+1, question: qText, answered: true, score: 50, correct: false, studentAnswer: studentAns, comment: 'Good effort!' };
           }
@@ -1061,8 +1154,13 @@ router.post('/:id/submit', async (req, res) => {
         const ans = quizAnswers[i] || {};
         const q = quizQuestions[i] || {};
         const studentAns = (ans.answer || '').trim();
+        // B04: a drawing/photo answer has no text at all - it's an image
+        // (drawingBase64/photoBase64). The skip-check below only looked at
+        // studentAns, so a real image submission with no text was always
+        // marked "skipped" regardless of what was actually submitted.
+        const imageAnswerB64 = ans.drawingBase64 || ans.photoBase64;
 
-        if (!studentAns) {
+        if (!studentAns && !((q.type === 'drawing' || q.type === 'photo') && imageAnswerB64)) {
           return { number: i+1, question: q.question || '', type: q.type || 'mcq',
             answered: false, score: 0, correct: false,
             studentAnswer: null, correctAnswer: q.correct || '',
@@ -1115,6 +1213,49 @@ router.post('/:id/submit', async (req, res) => {
             comment: isCorrect ? 'Correct! Well done.' : `Not quite. The correct answer is: ${correctAnswer}`,
             explanation: q.explanation || '',
           };
+        } else if (q.type === 'drawing' || q.type === 'photo') {
+          // B04: worksheet-upload drawing/photo question - reuses the exact
+          // same shared helpers as the scaffolded stepAnswers drawing/photo
+          // branch above (uploadSubmissionEvidence + gradeVisionSubmission),
+          // not a second copy of that grading logic.
+          const imageMimeVal = ans.drawingMime || ans.photoMime || 'image/jpeg';
+          if (!imageAnswerB64) {
+            return { number: i+1, question: q.question || '', type: q.type,
+              answered: false, score: 0, correct: false, studentAnswer: null,
+              comment: 'Please submit your drawing or photo next time!', explanation: q.explanation || '' };
+          }
+
+          const evidenceUrl = await uploadSubmissionEvidence({ imageB64: imageAnswerB64, imageMimeVal, id, studentId, label: `q${i + 1}` });
+
+          const contentParts = [{
+            type: 'text',
+            text: `You are Aivorah, grading a ${assignment.grade || 'Grade 3'} ${assignment.curriculum || 'IB PYP'} student's ${q.type === 'drawing' ? 'drawing' : 'photo submission'} for "${q.question}" (${assignment.subject || ''}).
+
+For drawing tasks:
+- Relevance to topic (40%): does the drawing match the task?
+- Effort & detail (30%): recognizable elements, multiple items drawn
+- Completeness (30%): filled the space, attempted the whole task
+- A drawing with clear topic relevance = 60-85%
+- A blank page, a single scribble, or an off-topic/irrelevant image = 0-10%
+- Be specific about what you actually see drawn — do NOT invent elements that are not there
+Respond ONLY as JSON: {"answered":true,"score":0-100,"studentAnswer":"third-person factual description of exactly what is drawn/shown","correct":bool,"comment":"warm specific feedforward spoken directly to the student (use you)","teacherNote":"one concise third-person sentence for the teacher on what the student demonstrated or misunderstood"}`,
+          }, { type: 'image_url', image_url: { url: `data:${imageMimeVal};base64,${imageAnswerB64}` } }];
+
+          const graded = await gradeVisionSubmission({ contentParts, gibberishCheckText: q.question || '' });
+          return {
+            number: i + 1,
+            question: q.question,
+            type: q.type,
+            answered: graded.answered,
+            score: graded.score,
+            needsReview: graded.needsReview,
+            correct: graded.correct,
+            studentAnswer: graded.studentAnswer,
+            comment: graded.comment,
+            teacherNote: graded.teacherNote,
+            explanation: q.explanation || '',
+            evidenceUrl,
+          };
         } else {
           // Short answer: Groq evaluates
           try {
@@ -1137,11 +1278,12 @@ Respond ONLY as JSON: {"score":0-100,"correct":bool,"comment":"one warm, specifi
               response_format: { type: 'json_object' },
             });
             const result = JSON.parse(comp.choices[0].message.content);
+            const clampedScore = Math.max(0, Math.min(100, Number(result.score) || 0));
             return {
               number: i+1, question: q.question, type: 'short_answer',
               answered: true,
-              score: Math.max(0, Math.min(100, Number(result.score) || 0)),
-              correct: !!result.correct,
+              score: clampedScore,
+              correct: resolveCorrectFromScore(clampedScore),
               studentAnswer: studentAns, correctAnswer: q.correct,
               comment: result.comment || '',
               explanation: q.explanation || '',
@@ -1158,7 +1300,12 @@ Respond ONLY as JSON: {"score":0-100,"correct":bool,"comment":"one warm, specifi
       perQuestion = graded;
       const answeredCount = graded.filter(q => q.answered).length;
       const correctCount  = graded.filter(q => q.correct).length;
-      score = graded.length > 0 ? Math.round(graded.reduce((s, q) => s + q.score, 0) / graded.length) : 0;
+      // B04: needsReview entries (score: null, AI grading itself failed) are
+      // excluded from the average - folding null in (coerces to 0 in a sum)
+      // would silently misrepresent the student's real performance on the
+      // questions that DID grade successfully.
+      const scorable = graded.filter(q => !q.needsReview);
+      score = scorable.length > 0 ? Math.round(scorable.reduce((s, q) => s + q.score, 0) / scorable.length) : 0;
 
       try {
         const summaryComp = await groq.chat.completions.create({
@@ -1199,6 +1346,10 @@ JSON: {"text":"...","wellDone":"specific strength","improve":"one specific topic
         // Build the text description of the student's answer for this step
         let answerDescription = '';
         const contentParts = [];
+        // B04: the original paper evidence (drawing/photo) must remain
+        // accessible for audit after grading - set only for drawing/photo
+        // steps once the upload below succeeds.
+        let evidenceUrl = null;
 
         const gradeLabel = assignment.grade || 'Grade 3';
         const currLabel  = assignment.curriculum || 'IB PYP';
@@ -1390,6 +1541,13 @@ Respond ONLY as JSON: {"answered":true,"score":0-100,"studentAnswer":"third-pers
           const imageMimeVal = ans.drawingMime || ans.photoMime || 'image/jpeg';
           if (!imageB64) return { number: i+1, stepLabel, type: ans.type, answered: false, score: 0, studentAnswer: 'No image submitted.', correct: false, comment: 'Please submit your drawing or photo next time!' };
 
+          // B04: persist the ORIGINAL evidence before grading (shared helper -
+          // see also the quiz-answer drawing/photo branch below) - previously
+          // the raw base64 was only ever used in-memory for this vision call
+          // and then discarded, so a teacher had no way to see what the
+          // student actually submitted after the fact.
+          evidenceUrl = await uploadSubmissionEvidence({ imageB64, imageMimeVal, id, studentId, label: `step${i + 1}` });
+
           prompt = `You are Aivorah, grading a ${gradeLabel} ${currLabel} student's ${ans.type === 'drawing' ? 'drawing' : 'photo submission'} for "${assignment.title}" (${assignment.subject}).
 Step: "${stepLabel}" â€” ${step.instructions || ''}
 ${criteriaBlock}
@@ -1410,41 +1568,31 @@ Respond ONLY as JSON: {"answered":true,"score":0-100,"studentAnswer":"third-pers
           contentParts.push({ type: 'image_url', image_url: { url: `data:${imageMimeVal};base64,${imageB64}` } });
         }
 
-        try {
-          const model = contentParts.some(p => p.type === 'image_url')
-            ? 'meta-llama/llama-4-maverick-17b-128e-instruct'
-            : 'openai/gpt-oss-120b';
-          const completion = await groq.chat.completions.create({
-            model,
-            messages: [{ role: 'user', content: contentParts.length === 1 ? contentParts[0].text : contentParts }],
-            ...(model === 'openai/gpt-oss-120b' ? { response_format: { type: 'json_object' } } : {}),
-          });
-          const raw = completion.choices[0].message.content.replace(/```json[\s\S]*?```|```/g, '').trim();
-          const result = JSON.parse(raw);
-          let stepScore = Math.max(0, Math.min(100, Number(result.score) || 0));
-          // Safety net: if the actual answer is gibberish/random characters, force a hard 0 —
-          // a teacher gives no marks for keyboard-mashing, even if the AI was lenient.
-          const isGibberish = isGibberishAnswer(answerDescription) || gibberishDescribed(result.studentAnswer) || gibberishDescribed(result.comment);
-          if (isGibberish) stepScore = 0;
-          return {
-            number: i + 1,
-            stepLabel,
-            type: ans.type,
-            answered: !!result.answered,
-            score: stepScore,
-            studentAnswer: result.studentAnswer || null,
-            correct: isGibberish ? false : !!result.correct,
-            comment: result.comment || '',
-            teacherNote: result.teacherNote || '',
-          };
-        } catch (e) {
-          console.error(`Step grading error ${i+1}:`, e.message);
-          return { number: i+1, stepLabel, type: ans.type, answered: true, score: 50, studentAnswer: null, correct: false, comment: 'Could not fully read this step.', teacherNote: '' };
-        }
+        // Shared grading call (see also the quiz-answer drawing/photo branch
+        // below) - one implementation of "call the vision/text model, parse,
+        // gibberish safety net, needsReview on failure" for every step type.
+        const graded = await gradeVisionSubmission({ contentParts, gibberishCheckText: answerDescription });
+        return {
+          number: i + 1,
+          stepLabel,
+          type: ans.type,
+          answered: graded.answered,
+          score: graded.score,
+          needsReview: graded.needsReview,
+          studentAnswer: graded.studentAnswer,
+          correct: graded.correct,
+          comment: graded.comment,
+          teacherNote: graded.teacherNote,
+          evidenceUrl,
+        };
       });
 
       perQuestion = await Promise.all(gradingPromises);
-      const answeredSteps = perQuestion.filter(q => q.answered);
+      // needsReview steps (score: null, AI grading itself failed) are excluded
+      // from the overall average - they were never actually scored, so
+      // folding a null/0 into the average would misrepresent the student's
+      // real performance on the steps that DID grade successfully.
+      const answeredSteps = perQuestion.filter(q => q.answered && !q.needsReview);
       score = answeredSteps.length > 0 ? Math.round(answeredSteps.reduce((s, q) => s + q.score, 0) / answeredSteps.length) : 0;
 
       // Self-assessment comparison â€” did student correctly assess themselves?
@@ -1493,7 +1641,8 @@ Respond ONLY as JSON: {"text":"...student-facing...","teacherSummary":"...teache
             response_format: { type: 'json_object' },
           });
           const r = JSON.parse(comp.choices[0].message.content);
-          return { number: i+1, question: qText, answered: true, score: Math.max(0, Math.min(100, Number(r.score)||0)), correct: !!r.correct, studentAnswer: studentAns, comment: r.comment || 'Good effort!' };
+          const clampedScore = Math.max(0, Math.min(100, Number(r.score)||0));
+          return { number: i+1, question: qText, answered: true, score: clampedScore, correct: resolveCorrectFromScore(clampedScore), studentAnswer: studentAns, comment: r.comment || 'Good effort!' };
         } catch (e) {
           console.error(`Text answer grading error Q${i+1}:`, e.message);
           return { number: i+1, question: qText, answered: true, score: 50, correct: false, studentAnswer: studentAns, comment: 'Good effort!' };
@@ -1646,13 +1795,14 @@ Respond ONLY as valid JSON:
           });
           const raw = completion.choices[0].message.content.replace(/```json[\s\S]*?```|```/g, '').trim();
           const result = JSON.parse(raw);
+          const clampedScore = Math.max(0, Math.min(100, Number(result.score) || 0));
           return {
             number: i + 1,
             question: `Page ${i + 1}`,
             answered: !!result.answered,
-            score: Math.max(0, Math.min(100, Number(result.score) || 0)),
+            score: clampedScore,
             studentAnswer: result.studentAnswer || null,
-            correct: !!result.correct,
+            correct: resolveCorrectFromScore(clampedScore),
             comment: result.comment || '',
           };
         } catch (e) {
@@ -2056,3 +2206,4 @@ router._internal = {
 };
 
 module.exports = router;
+module.exports.normalizeQuizQuestion = normalizeQuizQuestion;

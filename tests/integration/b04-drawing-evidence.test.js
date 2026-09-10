@@ -1,0 +1,174 @@
+// B04 (Phase 1) — the two confirmed gaps on the scaffolded drawing/photo
+// grading path, POST /assignments/:id/submit (the REAL live endpoint —
+// confirmed via frontend call-site audit: ScaffoldedModal.tsx submits
+// stepAnswers to ASSIGNMENTS_SERVER_URL, this microservice, not the
+// monolith's own duplicate copy of this same code):
+//
+// 1. The student's original drawing/photo was used only in-memory for the
+//    vision-grading call, then discarded - never persisted anywhere. A
+//    teacher had no way to see what was actually submitted after grading.
+// 2. A grading exception (bad AI response, parse error, API failure)
+//    silently defaulted to score:50 - indistinguishable from a real
+//    AI-assigned 50%, so a failed grading attempt looked like a real score.
+//
+// Fix: upload the evidence to Cloudinary before grading and attach
+// `evidenceUrl` to every drawing/photo perQuestion entry (success or
+// failure); replace the silent score:50 fallback with an explicit
+// `needsReview: true, score: null` state, excluded from the score average.
+const { makeSupabaseMock } = require('../helpers/supabaseMock');
+const mockSb = makeSupabaseMock();
+jest.mock('../../services/supabase', () => mockSb.supabase);
+
+const mockGroqCreate = jest.fn();
+jest.mock('groq-sdk', () => jest.fn().mockImplementation(() => ({
+  chat: { completions: { create: (...args) => mockGroqCreate(...args) } },
+})));
+
+const mockCloudinaryUpload = jest.fn();
+jest.mock('cloudinary', () => ({
+  v2: { config: jest.fn(), uploader: { upload: (...args) => mockCloudinaryUpload(...args) } },
+}));
+
+const request = require('supertest');
+const app = require('../../index');
+
+const STUDENT_UUID = '11111111-1111-1111-1111-111111111111';
+
+function groqJson(obj) {
+  return Promise.resolve({ choices: [{ message: { content: JSON.stringify(obj) } }] });
+}
+
+function baseAssignmentRow(overrides = {}) {
+  return {
+    id: 'a1', title: 'Draw Your Farm', subject: 'Visual Arts', chapter: '', grade: 'Grade 3',
+    curriculum: 'IB PYP', due_date: '2099-01-01', created_by_id: null, created_by_role: 'teacher',
+    questions: [], quiz_questions: [], task_steps: [], success_criteria: [], document_urls: [],
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  mockSb.reset();
+  mockGroqCreate.mockReset();
+  mockCloudinaryUpload.mockReset();
+});
+
+describe('B04 Phase 1 — drawing/photo evidence persistence (real endpoint: assignments-service)', () => {
+  test('a real drawing submission is uploaded to Cloudinary BEFORE grading, and evidenceUrl is returned', async () => {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ task_steps: [{ type: 'drawing', label: 'Draw your farm' }] }), error: null },
+      { data: baseAssignmentRow(), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm123.jpg' });
+    mockGroqCreate
+      .mockResolvedValueOnce(groqJson({ answered: true, score: 75, studentAnswer: 'A farm with rows of crops.', correct: true, comment: 'Great farm drawing!', teacherNote: 'Clear rows of crops drawn.' }))
+      .mockResolvedValueOnce(groqJson({ text: 'Great job!', wellDone: 'Nice drawing', improve: 'Add more detail' }));
+
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID,
+      stepAnswers: [{ type: 'drawing', drawingBase64: 'ZmFrZS1pbWFnZS1kYXRh', drawingMime: 'image/png' }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(mockCloudinaryUpload).toHaveBeenCalledWith(
+      expect.stringContaining('data:image/png;base64,'),
+      expect.objectContaining({ folder: 'aivorah/submission_evidence' }),
+    );
+    expect(res.body.perQuestion[0]).toMatchObject({ score: 75, evidenceUrl: 'https://res.cloudinary.com/evidence/farm123.jpg' });
+  });
+
+  test('a Cloudinary upload failure does not block grading — evidenceUrl is null but the step still grades normally', async () => {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ task_steps: [{ type: 'drawing', label: 'Draw your farm' }] }), error: null },
+      { data: baseAssignmentRow(), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockCloudinaryUpload.mockRejectedValue(new Error('Cloudinary quota exceeded'));
+    mockGroqCreate
+      .mockResolvedValueOnce(groqJson({ answered: true, score: 80, studentAnswer: 'A farm with animals.', correct: true, comment: 'Nice work!', teacherNote: '' }))
+      .mockResolvedValueOnce(groqJson({ text: 'Nice!', wellDone: '', improve: '' }));
+
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID,
+      stepAnswers: [{ type: 'drawing', drawingBase64: 'ZmFrZS1pbWFnZS1kYXRh', drawingMime: 'image/png' }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.perQuestion[0].score).toBe(80);
+    expect(res.body.perQuestion[0].evidenceUrl).toBeNull();
+  });
+
+  test('THE ORIGINAL GAP: an AI grading failure must not silently become score:50', async () => {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ task_steps: [{ type: 'drawing', label: 'Draw your farm' }] }), error: null },
+      { data: baseAssignmentRow(), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm999.jpg' });
+    // Malformed JSON — simulates a real parse failure on the AI's response.
+    mockGroqCreate
+      .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }))
+      .mockResolvedValueOnce(groqJson({ text: 'Great effort!' }));
+
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID,
+      stepAnswers: [{ type: 'drawing', drawingBase64: 'ZmFrZS1pbWFnZS1kYXRh', drawingMime: 'image/png' }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.perQuestion[0].score).not.toBe(50);
+  });
+
+  test('an AI grading failure sets needsReview:true, score:null, and still keeps the persisted evidenceUrl', async () => {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ task_steps: [{ type: 'drawing', label: 'Draw your farm' }] }), error: null },
+      { data: baseAssignmentRow(), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm999.jpg' });
+    mockGroqCreate
+      .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }))
+      .mockResolvedValueOnce(groqJson({ text: 'Great effort!' }));
+
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID,
+      stepAnswers: [{ type: 'drawing', drawingBase64: 'ZmFrZS1pbWFnZS1kYXRh', drawingMime: 'image/png' }],
+    });
+
+    expect(res.status).toBe(200);
+    const step = res.body.perQuestion[0];
+    expect(step.needsReview).toBe(true);
+    expect(step.score).toBeNull();
+    expect(step.evidenceUrl).toBe('https://res.cloudinary.com/evidence/farm999.jpg');
+  });
+
+  test('a needsReview step is excluded from the overall score average, not folded in as 0', async () => {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ task_steps: [
+        { type: 'drawing', label: 'Draw your farm' },
+        { type: 'drawing', label: 'Draw your barn' },
+      ] }), error: null },
+      { data: baseAssignmentRow(), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://x/e.jpg' });
+    mockGroqCreate
+      .mockResolvedValueOnce(groqJson({ answered: true, score: 100, studentAnswer: 'x', correct: true, comment: 'x', teacherNote: '' }))
+      .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }))
+      .mockResolvedValueOnce(groqJson({ text: 'Great job!' }));
+
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID,
+      stepAnswers: [
+        { type: 'drawing', drawingBase64: 'YQ==', drawingMime: 'image/png' },
+        { type: 'drawing', drawingBase64: 'Yg==', drawingMime: 'image/png' },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    // If the needsReview step were folded in as 0, the average would be 50
+    // (100+0)/2. Excluding it entirely, the average of the ONE real score is 100.
+    expect(res.body.score).toBe(100);
+  });
+});
