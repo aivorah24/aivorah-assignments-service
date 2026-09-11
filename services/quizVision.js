@@ -234,6 +234,50 @@ async function callGeminiVision(parts, { grade, subject, school } = {}) {
   return geminiGenerate(model, [...parts, { text: prompt }]);
 }
 
+// ── Qwen 2.5-VL-72B Vision (via HuggingFace router) — fallback when Gemini
+// fails ─────────────────────────────────────────────────────────────────
+// Live-verified 2026-09-11: this key/model responds successfully right now,
+// unlike the only available Gemini key (depleted). Image-only for now (no
+// PDF support — HF's chat-completions API takes image_url data URIs, not a
+// native PDF part like Gemini's inlineData); PDF generation stays
+// Gemini-only until page rasterization is added (see
+// QUIZ_PIPELINE_MIGRATION.md).
+const HF_TOKEN = process.env.HF_TOKEN;
+const QWEN_VISION_MODEL = 'Qwen/Qwen2.5-VL-72B-Instruct';
+async function callQwenVision(imageBuffer, mime, { grade, subject, school } = {}) {
+  if (!HF_TOKEN) throw new Error('HF_TOKEN not configured');
+  const prompt = buildQuizVisionPrompt({ grade, subject, school });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 90000);
+  try {
+    const res = await fetch('https://router.huggingface.co/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${HF_TOKEN}`, 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: QWEN_VISION_MODEL,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:${mime || 'image/png'};base64,${imageBuffer.toString('base64')}` } },
+            { type: 'text', text: prompt },
+          ],
+        }],
+        max_tokens: 8192,
+        temperature: 0.3,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`HF router ${res.status}: ${body.slice(0, 200)}`);
+    }
+    const json = await res.json();
+    return json.choices?.[0]?.message?.content || '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function parseQuizResponse(raw) {
   try {
     return JSON.parse(cleanLLMJson(raw));
@@ -244,12 +288,19 @@ function parseQuizResponse(raw) {
   }
 }
 
-// Increment 1: single image → quiz JSON. No OCR cross-validation, no diagram
-// matching, no answer-verification, no fallback chain — see
-// QUIZ_PIPELINE_MIGRATION.md for what's still pending.
+// Increment 1 (+ Qwen fallback, added 2026-09-11): single image → quiz
+// JSON. Gemini first; if it throws for ANY reason (including the currently
+// depleted key), falls back to Qwen — live-verified working right now. No
+// OCR cross-validation, no diagram matching, no answer-verification pass
+// yet — see QUIZ_PIPELINE_MIGRATION.md for what's still pending.
 async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school } = {}) {
   const parts = geminiImageParts([{ buffer: imageBuffer, mime }]);
-  const raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+  let raw;
+  try {
+    raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+  } catch (geminiErr) {
+    raw = await callQwenVision(imageBuffer, mime, { grade, subject, school });
+  }
   return parseQuizResponse(raw);
 }
 
@@ -264,6 +315,6 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, buildQuizVisionPrompt, cleanLLMJson,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, buildQuizVisionPrompt, cleanLLMJson,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };

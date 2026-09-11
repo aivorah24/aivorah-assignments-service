@@ -21,6 +21,9 @@ function geminiJsonResponse(obj) {
   return Promise.resolve({ response: { text: () => JSON.stringify(obj) } });
 }
 
+const realFetch = global.fetch;
+afterEach(() => { global.fetch = realFetch; });
+
 describe('POST /quiz/generate-image — validation', () => {
   let app;
   beforeAll(() => { app = require('../../index'); });
@@ -85,24 +88,6 @@ describe('POST /quiz/generate-image — real failure handling', () => {
   beforeAll(() => { app = require('../../index'); });
   beforeEach(() => mockGenerateContent.mockReset());
 
-  test('a real daily-quota-exhausted error fails fast (no retry) and surfaces as a 500 with its message', async () => {
-    // geminiRetry's fast-fail path (real behavior ported from the monolith,
-    // not mocked away): a 429 mentioning "daily" quota can't recover within
-    // a retry window, so it skips the exponential-backoff retries entirely.
-    // A generic 429 (e.g. real-world "prepayment credits depleted", which
-    // doesn't mention "daily") instead retries for real elapsed minutes -
-    // exercised here via the fast path so this test stays fast and
-    // deterministic; the retry behavior itself lives in geminiRetry, not
-    // re-tested per caller.
-    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
-    const res = await request(app)
-      .post('/quiz/generate-image')
-      .attach('image', Buffer.from('fake-png-bytes'), { filename: 'worksheet.png', contentType: 'image/png' });
-    expect(res.status).toBe(500);
-    expect(res.body.error).toMatch(/daily quota/);
-    expect(mockGenerateContent).toHaveBeenCalledTimes(1); // fast-fail, no retries
-  });
-
   test('a malformed (non-JSON) Gemini response surfaces as a 500 with the raw text, not a crash', async () => {
     mockGenerateContent.mockResolvedValue({ response: { text: () => 'not valid json at all' } });
     const res = await request(app)
@@ -111,5 +96,48 @@ describe('POST /quiz/generate-image — real failure handling', () => {
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('AI returned invalid JSON');
     expect(res.body.raw).toBe('not valid json at all');
+  });
+});
+
+describe('POST /quiz/generate-image — Qwen fallback when Gemini fails', () => {
+  // Live-verified 2026-09-11: with the only available Gemini key depleted,
+  // this fallback is what actually produces a real quiz right now. Gemini's
+  // own retry/fast-fail behavior (geminiRetry) is covered separately in
+  // quizVision's own concerns — these tests are about the fallback wiring:
+  // does a Gemini failure of any kind actually hand off to Qwen, and is the
+  // combined-failure case still a clean error, not a hang or a crash.
+  let app;
+  beforeAll(() => { app = require('../../index'); });
+  beforeEach(() => mockGenerateContent.mockReset());
+
+  test('a real daily-quota Gemini failure falls back to Qwen, which succeeds', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ title: 'Qwen Read This', tasks: [] }) } }] }),
+    });
+
+    const res = await request(app)
+      .post('/quiz/generate-image')
+      .attach('image', Buffer.from('fake-png-bytes'), { filename: 'worksheet.png', contentType: 'image/png' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.quiz.title).toBe('Qwen Read This');
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://router.huggingface.co/v1/chat/completions',
+      expect.objectContaining({ method: 'POST' })
+    );
+  });
+
+  test('a real Gemini failure with Qwen ALSO failing (e.g. HF router down) surfaces the Qwen error, not a hang', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, text: async () => 'Service Unavailable' });
+
+    const res = await request(app)
+      .post('/quiz/generate-image')
+      .attach('image', Buffer.from('fake-png-bytes'), { filename: 'worksheet.png', contentType: 'image/png' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toMatch(/HF router 503/);
   });
 });
