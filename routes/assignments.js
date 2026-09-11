@@ -1663,6 +1663,122 @@ Respond ONLY as valid JSON: {"questions":[{"id":"q1","question":"...","type":"mc
   }
 });
 
+// ── POST /assignments/pdf-to-quiz ─────────────────────────────────────────
+// Ported from the monolith (2026-09-11, B05) — only needs pdf-parse (already
+// a dependency here, used by nothing else yet) + Groq (already configured
+// above), no Puppeteer/Cloudinary, unlike docx-to-pdf.
+// Body: { fileBase64, mimeType, subject, grade, difficulty, count }
+router.post('/pdf-to-quiz', async (req, res) => {
+  const {
+    fileBase64, mimeType = 'application/pdf',
+    subject = '', grade = '', difficulty = 'medium', count = 5,
+  } = req.body;
+  if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
+
+  const requestedCount = normalizeQuizCount(count, 5);
+
+  try {
+    // Step 1: extract text content from the uploaded file
+    let contentText = '';
+
+    if (mimeType === 'application/pdf') {
+      const pdfParse = require('pdf-parse');
+      const buffer = Buffer.from(fileBase64, 'base64');
+      const pdfData = await pdfParse(buffer);
+      contentText = pdfData.text?.trim() || '';
+    } else {
+      // For images, use Groq Vision to extract all text
+      const visionCompletion = await groq.chat.completions.create({
+        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Extract ALL text content from this image. Include all questions, instructions, paragraphs, and any visible text. Return the raw text only, no formatting.' },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${fileBase64}` } },
+          ],
+        }],
+      });
+      contentText = visionCompletion.choices[0].message.content?.trim() || '';
+    }
+
+    if (!contentText) return res.json({ questions: [], extracted: '' });
+
+    // Step 2: generate MCQ quiz questions from the extracted content
+    const difficultyGuide = {
+      easy:   'Simple, recall-based. Single-step. Vocabulary and basic facts.',
+      medium: 'Understanding-based. Requires applying the concept, not just recall.',
+      hard:   'Application and analysis. Multi-step thinking, real-world scenarios.',
+    }[difficulty] || 'moderate difficulty';
+
+    const prompt = `You are creating an interactive quiz from uploaded worksheet/PDF content.
+${subject ? `Subject: ${subject}` : ''}
+${grade ? `Grade: ${grade}` : ''}
+
+UPLOADED CONTENT:
+${contentText.slice(0, 6000)}
+
+INSTRUCTIONS:
+- If the content contains existing questions/exercises, convert them into MCQ format
+- If the content is informational (no questions), generate quiz questions BASED ON the content
+- Generate exactly ${requestedCount} MCQ questions
+- Difficulty: ${difficultyGuide}
+- Age-appropriate language${grade ? ` for ${grade} students` : ''}
+- Every question MUST be type "mcq" with exactly 4 options
+- Only ONE correct option per question
+- Include a hint and explanation for each
+
+Respond ONLY as valid JSON:
+{
+  "questions": [
+    {
+      "id": "q1",
+      "question": "question text here",
+      "type": "mcq",
+      "options": ["option1", "option2", "option3", "option4"],
+      "correct": "option1",
+      "hint": "Think about...",
+      "explanation": "The correct answer is A because..."
+    }
+  ]
+}`;
+
+    const completion = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-120b',
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' },
+    });
+
+    const result = JSON.parse(completion.choices[0].message.content);
+    const generated = normalizeQuizQuestions(Array.isArray(result.questions) ? result.questions : [], requestedCount);
+
+    res.json({ questions: generated, extractedText: contentText.slice(0, 500) });
+  } catch (e) {
+    console.error('pdf-to-quiz error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /assignments/upload-doc ──────────────────────────────────────────
+// Upload a document (PDF or image) to Cloudinary; returns the URL. Ported
+// from the monolith (2026-09-11, B05) — only needs Cloudinary, already
+// configured above (used by the evidence upload in POST /:id/submit).
+// Body: { fileBase64: string, fileName: string, mimeType: string }
+router.post('/upload-doc', async (req, res) => {
+  const { fileBase64, fileName = 'assignment', mimeType = 'application/pdf' } = req.body;
+  if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
+  try {
+    const dataUri = `data:${mimeType};base64,${fileBase64}`;
+    const result = await cloudinary.uploader.upload(dataUri, {
+      folder:        'ai_mentor/assignments',
+      public_id:     `doc_${Date.now()}`,
+      resource_type: 'auto',
+    });
+    res.json({ url: result.secure_url, publicId: result.public_id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── POST /assignments/:id/submit ──
 router.post('/:id/submit', async (req, res) => {
   const { id } = req.params;
