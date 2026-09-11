@@ -16,11 +16,15 @@
  */
 const express  = require('express');
 const router   = express.Router();
+const multer   = require('multer');
 const supabase = require('../services/supabase');
 const {
   renderQuizHTML, autoDetectMCQ, normalizeMatchingTasks, normalizeVennQuestions,
   normalizeRiddleTables, normalizeLetterGridTables, normalizeTables, normalizeCharts,
 } = require('../utils/quizHtmlRenderer');
+const { generateQuizFromImage } = require('../services/quizVision');
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // Mirrors GET /branding/logos — same lookup already duplicated into
 // routes/assignments.js for the same reason (no self HTTP call needed).
@@ -69,6 +73,29 @@ router.post('/normalize', async (req, res) => {
     normalizeMatchingTasks(quiz);
     res.json({ quiz });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /quiz/generate-image — Increment 1 of the AI extraction pipeline ──
+// migration (see QUIZ_PIPELINE_MIGRATION.md). Single worksheet image → quiz
+// JSON via Gemini vision ONLY: no OCR cross-validation, no diagram
+// extraction/matching, no answer-verification pass, no multi-vendor fallback
+// chain yet — each is a separate, tracked increment, not a permanent
+// omission. Response shape is a strict subset of the monolith's
+// ({ quiz } only) — callers must not assume validation/answerVerification
+// are present until later increments land.
+router.post('/generate-image', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No image file uploaded' });
+    const { grade, subject, school } = req.body;
+    const mime = req.file.mimetype || 'image/png';
+    const quiz = await generateQuizFromImage(req.file.buffer, mime, { grade, subject, school });
+    res.json({ quiz });
+  } catch (err) {
+    if (err.message === 'AI returned invalid JSON') {
+      return res.status(500).json({ error: err.message, raw: err.raw });
+    }
     res.status(500).json({ error: err.message });
   }
 });
