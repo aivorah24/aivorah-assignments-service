@@ -1452,6 +1452,84 @@ Rules:
   }
 });
 
+// ── POST /assignments/generate-steps ─────────────────────────────────────
+// Ported from the monolith (2026-09-11, B05) — self-contained (Groq only,
+// same as ai-generate above), used by the teacher Assignments screen's
+// scaffolded-task-step wizard.
+// Use Groq AI to generate topic-specific task step labels + instructions
+// with grade/curriculum guardrails.
+// Body: { topic, subject, grade, curriculum }
+router.post('/generate-steps', async (req, res) => {
+  const { topic = '', subject = '', grade = 'Grade 3', curriculum = 'IB PYP' } = req.body;
+  if (!topic.trim()) return res.status(400).json({ error: 'topic required' });
+
+  // IB PYP subject-aware step type map (Kath Murdoch inquiry cycle)
+  const SUBJECT_STEP_MAP = {
+    'Mathematics':          ['tuning_in',           'problem_solving',       'math_reflection'],
+    'Science':              ['prior_knowledge',      'drawing',               'structured_writing'],
+    'English':              ['text_connection',      'reading_comprehension', 'writing_reflection'],
+    'Language Acquisition': ['language_culture',     'language_practice',     'communication'],
+    'Social Studies':       ['social_inquiry',       'research_notes',        'social_synthesis'],
+    'Visual Arts':          ['artistic_exploration', 'art_creation',          'artistic_reflection'],
+    'ICT':                  ['digital_awareness',    'tech_skill_practice',   'digital_citizenship'],
+    'Physical Education':   ['movement_exploration', 'skill_practice',        'physical_reflection'],
+  };
+
+  const isIBPYP = (curriculum || '').toLowerCase().includes('ib');
+  const stepTypes = (isIBPYP && SUBJECT_STEP_MAP[subject]) || ['brainstorm', 'drawing', 'structured_writing'];
+  const [type1, type2, type3] = stepTypes;
+
+  const curriculumNote = isIBPYP
+    ? `This is IB PYP. Use inquiry-based, student-centred language. Connect to real-world contexts.`
+    : `This is ${curriculum}. Use clear, simple language aligned with this curriculum.`;
+
+  const prompt = `You are Aivorah, a compassionate AI tutor creating a scaffolded assignment for a ${grade} ${curriculum} student.
+
+Topic: "${topic}"
+Subject: ${subject || 'General'}
+${curriculumNote}
+
+Create 3 task steps SPECIFIC to this topic. Use age-appropriate language for ${grade}.
+
+Return ONLY valid JSON with exactly these keys — use the EXACT type names shown:
+{
+  "${type1}": {
+    "label": "A short engaging title (3-5 words) specific to '${topic}'",
+    "instructions": "Step 1 instruction specific to '${topic}'. Type is ${type1} — match the pedagogy of this step type."
+  },
+  "${type2}": {
+    "label": "A short engaging title (3-5 words) specific to '${topic}'",
+    "instructions": "Step 2 instruction specific to '${topic}'. Type is ${type2} — match the pedagogy of this step type."
+  },
+  "${type3}": {
+    "label": "A short engaging title (3-5 words) specific to '${topic}'",
+    "instructions": "Step 3 instruction specific to '${topic}'. Type is ${type3} — match the pedagogy of this step type."
+  }
+}`;
+
+  try {
+    const completion = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-120b',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 500,
+      response_format: { type: 'json_object' },
+    });
+    const raw = completion.choices[0]?.message?.content || '{}';
+    const parsed = JSON.parse(raw);
+    const steps = [];
+    for (const type of stepTypes) {
+      if (parsed[type]?.label && parsed[type]?.instructions) {
+        steps.push({ type, label: parsed[type].label, instructions: parsed[type].instructions });
+      }
+    }
+    if (steps.length === 0) return res.status(500).json({ error: 'AI returned invalid structure' });
+    res.json({ steps });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /assignments/generate-quiz ──
 router.post('/generate-quiz', async (req, res) => {
   const {
