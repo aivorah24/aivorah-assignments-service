@@ -744,20 +744,14 @@ GENERAL RULES:
           ]);
           raw = result.response.text();
         } catch (geminiErr) {
-          console.log('[extract] Gemini failed, trying Groq vision:', geminiErr.message);
-          const completion = await groq.chat.completions.create({
-            model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-            temperature: 0,
-            max_tokens: 2000,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'text', text: extractPrompt },
-                { type: 'image_url', image_url: { url: `data:${file.mime};base64,${file.base64}` } },
-              ],
-            }],
-          });
-          raw = completion.choices[0].message.content;
+          // Groq no longer offers any vision-capable model on this account
+          // (llama-4-scout/maverick both 404 model_not_found as of
+          // 2026-09) - falling back to Qwen (HF router) instead, which is
+          // confirmed live and working.
+          console.log('[extract] Gemini failed, trying Qwen vision:', geminiErr.message);
+          const { callQwenVisionRaw } = require('../services/quizVision');
+          const buffer = Buffer.from(file.base64, 'base64');
+          raw = await callQwenVisionRaw(buffer, file.mime, extractPrompt);
         }
         raw = (raw || '').replace(/```json|```/g, '').trim();
         console.log('[extract] Raw AI response:', raw.slice(0, 500));
@@ -826,19 +820,13 @@ GENERAL RULES:
 
     if (!merged.title && fileList.length > 0 && fileList[0].mime !== 'application/pdf') {
       try {
-        const titleCompletion = await groq.chat.completions.create({
-          model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-          temperature: 0,
-          max_tokens: 200,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: 'What is the title or heading of this worksheet? Look for large, bold, or decorative text at the top of the page. Reply with ONLY the title text, nothing else. If you cannot find a title, reply with "NONE".' },
-              { type: 'image_url', image_url: { url: `data:${fileList[0].mime};base64,${fileList[0].base64}` } },
-            ],
-          }],
-        });
-        const titleRaw = titleCompletion.choices[0].message.content.trim().replace(/^["']|["']$/g, '');
+        // Groq no longer offers a vision-capable model on this account -
+        // use Qwen (HF router) instead, same as the main extract fallback.
+        const { callQwenVisionRaw } = require('../services/quizVision');
+        const titleBuffer = Buffer.from(fileList[0].base64, 'base64');
+        const titleContent = await callQwenVisionRaw(titleBuffer, fileList[0].mime,
+          'What is the title or heading of this worksheet? Look for large, bold, or decorative text at the top of the page. Reply with ONLY the title text, nothing else. If you cannot find a title, reply with "NONE".');
+        const titleRaw = titleContent.trim().replace(/^["']|["']$/g, '');
         console.log('[extract] Title fallback result:', titleRaw);
         if (titleRaw && titleRaw !== 'NONE' && titleRaw.length < 100) {
           merged.title = titleRaw;
@@ -1713,18 +1701,12 @@ router.post('/pdf-to-quiz', async (req, res) => {
       const pdfData = await pdfParse(buffer);
       contentText = pdfData.text?.trim() || '';
     } else {
-      // For images, use Groq Vision to extract all text
-      const visionCompletion = await groq.chat.completions.create({
-        model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: 'Extract ALL text content from this image. Include all questions, instructions, paragraphs, and any visible text. Return the raw text only, no formatting.' },
-            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${fileBase64}` } },
-          ],
-        }],
-      });
-      contentText = visionCompletion.choices[0].message.content?.trim() || '';
+      // Groq no longer offers a vision-capable model on this account - use
+      // Qwen (HF router) instead, same as the extract-questions fallback.
+      const { callQwenVisionRaw } = require('../services/quizVision');
+      const imgBuffer = Buffer.from(fileBase64, 'base64');
+      contentText = (await callQwenVisionRaw(imgBuffer, mimeType,
+        'Extract ALL text content from this image. Include all questions, instructions, paragraphs, and any visible text. Return the raw text only, no formatting.')).trim();
     }
 
     if (!contentText) return res.json({ questions: [], extracted: '' });

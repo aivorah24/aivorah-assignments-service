@@ -13,7 +13,14 @@ jest.mock('@google/generative-ai', () => ({
   })),
 }));
 
+const mockGroqCreate = jest.fn();
+jest.mock('groq-sdk', () => jest.fn().mockImplementation(() => ({
+  chat: { completions: { create: (...args) => mockGroqCreate(...args) } },
+})));
+
 const request = require('supertest');
+const fs = require('fs');
+const path = require('path');
 
 function geminiJsonResponse(obj) {
   return Promise.resolve({ response: { text: () => JSON.stringify(obj) } });
@@ -71,12 +78,15 @@ describe('POST /quiz/generate — real failure handling', () => {
   beforeAll(() => { app = require('../../index'); });
   beforeEach(() => mockGenerateContent.mockReset());
 
-  test('a real permanent-billing 429 (e.g. depleted prepayment credits) fails fast, not after minutes of retries', async () => {
+  test('a real permanent-billing 429 (e.g. depleted prepayment credits) fails fast (no retries), then falls back to Groq text extraction, which fails cleanly on a non-PDF buffer', async () => {
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: Your prepayment credits are depleted.'));
     const res = await request(app).post('/quiz/generate').attach('pdf', Buffer.from('%PDF'), { filename: 'w.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(500);
-    expect(res.body.error).toMatch(/prepayment credits/);
     expect(mockGenerateContent).toHaveBeenCalledTimes(1); // fast-fail, no retries
+    // Buffer.from('%PDF') isn't a real PDF, so the Groq-text fallback's own
+    // pdf-parse step fails too - proving the fallback chain runs (not just
+    // that Gemini failed) without needing a real PDF fixture in this suite.
+    expect(res.body.error).toMatch(/Invalid PDF structure/);
   });
 
   test('a malformed (non-JSON) Gemini response surfaces as a 500 with the raw text', async () => {
@@ -84,6 +94,26 @@ describe('POST /quiz/generate — real failure handling', () => {
     const res = await request(app).post('/quiz/generate').attach('pdf', Buffer.from('%PDF'), { filename: 'w.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('AI returned invalid JSON');
+  });
+});
+
+describe('POST /quiz/generate — Groq text fallback when Gemini fails (PDF path)', () => {
+  let app;
+  beforeAll(() => { app = require('../../index'); });
+  beforeEach(() => { mockGenerateContent.mockReset(); mockGroqCreate.mockReset(); });
+
+  test('a real Gemini failure on a real PDF falls back to Groq text extraction, which succeeds', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Groq Read This From Text', tasks: [] }) } }] });
+
+    const realPdf = fs.readFileSync(path.join(__dirname, '../fixtures/b02-ib-pyp-worksheet.pdf'));
+    const res = await request(app)
+      .post('/quiz/generate')
+      .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.quiz.title).toBe('Groq Read This From Text');
+    expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
   });
 });
 

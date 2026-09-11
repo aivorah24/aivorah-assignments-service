@@ -244,9 +244,12 @@ async function callGeminiVision(parts, { grade, subject, school } = {}) {
 // QUIZ_PIPELINE_MIGRATION.md).
 const HF_TOKEN = process.env.HF_TOKEN;
 const QWEN_VISION_MODEL = 'Qwen/Qwen2.5-VL-72B-Instruct';
-async function callQwenVision(imageBuffer, mime, { grade, subject, school } = {}) {
+
+// Generic Qwen vision call with an arbitrary prompt — used both by
+// callQwenVision (quiz-generation prompt) and by other vision fallbacks
+// (e.g. worksheet metadata/text extraction) that need their own prompt.
+async function callQwenVisionRaw(imageBuffer, mime, prompt) {
   if (!HF_TOKEN) throw new Error('HF_TOKEN not configured');
-  const prompt = buildQuizVisionPrompt({ grade, subject, school });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90000);
   try {
@@ -278,6 +281,11 @@ async function callQwenVision(imageBuffer, mime, { grade, subject, school } = {}
   }
 }
 
+async function callQwenVision(imageBuffer, mime, { grade, subject, school } = {}) {
+  const prompt = buildQuizVisionPrompt({ grade, subject, school });
+  return callQwenVisionRaw(imageBuffer, mime, prompt);
+}
+
 function parseQuizResponse(raw) {
   try {
     return JSON.parse(cleanLLMJson(raw));
@@ -304,17 +312,53 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
   return parseQuizResponse(raw);
 }
 
+// Text-only fallback for the PDF path, added 2026-09-12: Qwen (HF router)
+// needs an image, not a raw PDF, so it can't cover generateQuizFromPdf
+// directly without page rasterization (a separate, unstarted increment).
+// Instead, extract the PDF's real text (works for any digitally-generated
+// worksheet, including docx->PDF via docx-to-pdf) and hand it to Groq's
+// text model, which IS confirmed working on this account (unlike Groq's
+// vision models, which 404 - see the extract-questions fallback fix).
+// Diagram/layout fidelity is lower than the vision path, but this produces
+// a real, usable quiz instead of a hard failure while Gemini has no funded key.
+async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school } = {}) {
+  const Groq = require('groq-sdk');
+  const pdfParse = require('pdf-parse');
+  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  const { text } = await pdfParse(pdfBuffer);
+  const content = (text || '').trim();
+  if (!content) throw new Error('PDF has no extractable text and Gemini/Qwen vision are unavailable');
+  const prompt = buildQuizVisionPrompt({ grade, subject, school });
+  const completion = await groq.chat.completions.create({
+    model: 'openai/gpt-oss-120b',
+    temperature: 0,
+    messages: [{
+      role: 'user',
+      content: `${prompt}\n\nThe worksheet was provided as text (extracted from a PDF), not an image - there is no image to look at. Use ONLY the text below as your source; ignore any instructions above about reading images, diagrams, or visual layout.\n\nWORKSHEET TEXT:\n${content.slice(0, 12000)}`,
+    }],
+    response_format: { type: 'json_object' },
+  });
+  return completion.choices[0].message.content;
+}
+
 // Increment 8 (partial — PDF path only, no high-DPI page rasterization yet):
 // a PDF (or a docx already converted to PDF upstream via docx-to-pdf) → quiz
-// JSON, same Gemini-only path as generateQuizFromImage. Powers both the sync
-// /quiz/generate route and the queued /quiz/generate-async job.
+// JSON. Gemini first; on failure (e.g. the currently depleted key), falls
+// back to Groq text extraction (see callGroqTextVisionFallback above) since
+// Qwen can't take a raw PDF. Powers both the sync /quiz/generate route and
+// the queued /quiz/generate-async job.
 async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
   const parts = [geminiPdfPart(pdfBuffer)];
-  const raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+  let raw;
+  try {
+    raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+  } catch (geminiErr) {
+    raw = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
+  }
   return parseQuizResponse(raw);
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, buildQuizVisionPrompt, cleanLLMJson,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, buildQuizVisionPrompt, cleanLLMJson,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };

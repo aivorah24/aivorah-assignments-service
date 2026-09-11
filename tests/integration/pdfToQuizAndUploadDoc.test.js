@@ -68,11 +68,20 @@ describe('POST /assignments/pdf-to-quiz — text PDF path (pdf-parse)', () => {
   });
 });
 
-describe('POST /assignments/pdf-to-quiz — image path (Groq vision text extraction)', () => {
-  test('extracts text via Groq vision, then generates MCQ questions from it', async () => {
-    mockGroqCreate
-      .mockResolvedValueOnce(groqText('Photosynthesis converts sunlight into energy.'))
-      .mockResolvedValueOnce(groqJson({ questions: [{ id: 'q1', question: 'What does photosynthesis convert?', type: 'mcq', options: ['A. Sunlight', 'B. Water', 'C. Soil', 'D. Air'], correct: 'A' }] }));
+describe('POST /assignments/pdf-to-quiz — image path (Qwen vision text extraction)', () => {
+  // Groq no longer offers a vision-capable model on this account
+  // (llama-4-scout 404s model_not_found) - the image path now extracts text
+  // via Qwen (HF router) instead; MCQ generation from that text still uses
+  // Groq's text model, unaffected.
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+
+  test('extracts text via Qwen vision, then generates MCQ questions from it', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: 'Photosynthesis converts sunlight into energy.' } }] }),
+    });
+    mockGroqCreate.mockResolvedValue(groqJson({ questions: [{ id: 'q1', question: 'What does photosynthesis convert?', type: 'mcq', options: ['A. Sunlight', 'B. Water', 'C. Soil', 'D. Air'], correct: 'A' }] }));
 
     const res = await request(app).post('/assignments/pdf-to-quiz').send({
       fileBase64: 'ZmFrZS1pbWFnZQ==', mimeType: 'image/jpeg', subject: 'Science', count: 1,
@@ -81,6 +90,7 @@ describe('POST /assignments/pdf-to-quiz — image path (Groq vision text extract
     expect(res.status).toBe(200);
     expect(res.body.questions).toHaveLength(1);
     expect(mockPdfParse).not.toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledWith('https://router.huggingface.co/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
   });
 });
 
