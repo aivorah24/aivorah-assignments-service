@@ -76,6 +76,32 @@ cloudinary.config({
 });
 const MCQ_LETTER_TO_INDEX = { A: 0, B: 1, C: 2, D: 3 };
 
+// ── docx-to-pdf conversion (mammoth → HTML → puppeteer → PDF) ──────────────
+// Ported from ai-mentor/server/routes/quiz.js (2026-09-11, B05).
+async function docxToPdf(buffer) {
+  const mammoth = require('mammoth');
+  const puppeteer = require('puppeteer');
+  const { value: bodyHtml } = await mammoth.convertToHtml({ buffer });
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    @page { size: A4; margin: 16mm; }
+    body { font-family: 'Times New Roman', Georgia, serif; font-size: 13pt; color:#000; line-height:1.55; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+    td, th { border: 1px solid #000; padding: 6px 10px; text-align: left; vertical-align: top; }
+    img { max-width: 100%; height: auto; }
+    h1,h2,h3 { margin: 12px 0 6px; }
+    p { margin: 6px 0; }
+  </style></head><body>${bodyHtml}</body></html>`;
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const pdf = await page.pdf({ format: 'A4', printBackground: true });
+    return Buffer.from(pdf);
+  } finally {
+    await browser.close();
+  }
+}
+
 // ── normalise() live-HTML-regen support (see routes/assignments.js:14-34) ──
 const _quizHtmlCache = new Map(); // assignmentId → { key, html }
 function renderQuizHTMLCached(assignmentId, quizJson, branding) {
@@ -1776,6 +1802,23 @@ router.post('/upload-doc', async (req, res) => {
     res.json({ url: result.secure_url, publicId: result.public_id });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /assignments/docx-to-pdf ─────────────────────────────────────────
+// Ported from the monolith (2026-09-11, B05) — the one worksheet-pipeline
+// route that genuinely needed new infra (Puppeteer, added as a dependency
+// here). Self-contained: mammoth (docx→HTML) + puppeteer (HTML→PDF), no
+// other pipeline state.
+router.post('/docx-to-pdf', async (req, res) => {
+  try {
+    const { fileBase64 } = req.body;
+    if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
+    const buffer = Buffer.from(fileBase64, 'base64');
+    const pdfBuf = await docxToPdf(buffer);
+    res.json({ pdfBase64: pdfBuf.toString('base64') });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
