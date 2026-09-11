@@ -74,4 +74,60 @@ describe('POST /assignments', () => {
     expect(res.status).toBe(500);
     expect(res.body.error).toBe('insert failed');
   });
+
+  // B05: this service's POST / used to accept only a bare subset of fields
+  // (title/subject/dueDate/studentId/questions/quizQuestions) — everything
+  // else a teacher fills in through the AI Assignment / IB / worksheet-upload
+  // flows (successCriteria, taskSteps, interactiveQuiz, documents, IB fields)
+  // was silently dropped when this route (rather than the monolith) handled
+  // the create. Assert the full insert payload to prove nothing is lost.
+  test('persists the full teacher-authoring field set (success criteria, task steps, IB fields, documents, interactive quiz)', async () => {
+    mockSb.setTable('users', { data: { id: TEACHER_UUID, name: 'Ms. Rao', school: 'Lotus School' }, error: null });
+    let insertedPayload = null;
+    mockSb.supabase.from.mockImplementation((table) => {
+      if (table === 'assignments') {
+        return {
+          insert: jest.fn((payload) => { insertedPayload = payload; return {
+            select: () => ({ single: () => Promise.resolve({ data: { id: 'a1', ...payload }, error: null }) }),
+          }; }),
+        };
+      }
+      return {
+        select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { id: TEACHER_UUID, name: 'Ms. Rao', school: 'Lotus School' }, error: null }), in: () => Promise.resolve({ data: [], error: null }) }), in: () => Promise.resolve({ data: [], error: null }) }),
+        insert: jest.fn(() => Promise.resolve({ data: null, error: null })),
+      };
+    });
+
+    const res = await request(app).post('/assignments').send({
+      title: 'IB Unit Assignment',
+      dueDate: '2026-09-20',
+      studentId: STUDENT_UUID,
+      createdById: TEACHER_UUID,
+      grade: 'Grade 4',
+      curriculum: 'IB PYP',
+      successCriteria: ['Can explain the water cycle'],
+      taskSteps: [{ type: 'structured_writing', prompt: 'Describe evaporation' }],
+      documentUrl: 'https://cdn.test/worksheet.pdf',
+      documentUrls: ['https://cdn.test/worksheet.pdf'],
+      centralIdea: 'Water shapes our world',
+      linesOfInquiry: ['The water cycle'],
+      learnerProfile: 'Inquirer',
+      atlSkill: 'Research skills',
+      keyConcept: 'Change',
+      unitOfInquiry: 'Sharing the Planet',
+    });
+
+    expect(res.status).toBe(200);
+    expect(insertedPayload).toEqual(expect.objectContaining({
+      success_criteria: ['Can explain the water cycle'],
+      task_steps: [{ type: 'structured_writing', prompt: 'Describe evaporation' }],
+      document_url: 'https://cdn.test/worksheet.pdf',
+      document_urls: ['https://cdn.test/worksheet.pdf'],
+      central_idea: 'Water shapes our world',
+      lines_of_inquiry: ['The water cycle'],
+      learner_profile: 'Inquirer',
+      atl_skill: 'Research skills',
+      key_concept: 'Change',
+    }));
+  });
 });

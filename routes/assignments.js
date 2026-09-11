@@ -62,6 +62,9 @@ const { resolveCorrectFromScore } = require('../utils/grading');
 const { normalizeCurriculum } = require('../utils/curriculum');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { publishJob } = require('../services/jobQueue');
+const { sendPush } = require('../services/push');
+const { client: qdrantClient } = require('../services/qdrant');
+const { embed } = require('../services/embeddings');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -891,19 +894,40 @@ router.post('/extract-questions-async', async (req, res) => {
   }
 });
 
+// Full teacher-authoring create — ported from the monolith's fuller POST /
+// (2026-09-11, B05 monolith-dependency cleanup) so no assignment field, push
+// notification, calendar entry, or parent alert is silently dropped when
+// created through this service instead of the monolith. Kept as one handler
+// (not split) to match the monolith's behavior exactly — this route was the
+// single largest remaining "assignment creation only partially works"
+// surface, see docs/SERVICE_MAP.md.
 router.post('/', async (req, res) => {
   try {
     const {
       title, subject = '', chapter = '', dueDate, type = 'assignment', note = '',
       studentId, createdById, createdByRole = 'teacher',
-      grade = null, curriculum = null, questions = [], quizQuestions = [],
+      grade = null, curriculum = null, questions = [], documentUrl = null, documentUrls = [],
+      successCriteria = [], taskSteps = [], quizQuestions = [],
+      centralIdea = null, linesOfInquiry = [], learnerProfile = null, atlSkill = null, keyConcept = null,
+      questionAnswers = {}, teacherComments = [],
+      interactiveQuiz = null, interactiveQuizHtml = null,
     } = req.body;
 
     if (!title || !dueDate) return res.status(400).json({ error: 'title and dueDate required' });
+    const normalizedQuizQuestions = normalizeQuizQuestions(Array.isArray(quizQuestions) ? quizQuestions : []);
+    // Parents create plain-text question assignments — skip MCQ validation for parent-created items
+    if (type === 'quiz' && normalizedQuizQuestions.length === 0 && createdByRole !== 'parent') {
+      return res.status(400).json({ error: 'Quiz must include valid MCQ questions (4 options each).' });
+    }
 
     const userId    = studentId   ? await resolveUserId(studentId)   : null;
     const creatorId = createdById ? await resolveUserId(createdById) : null;
 
+    // ── Curriculum partitioning ────────────────────────────────────────────
+    // A class-wide assignment (no specific student) reaches students by matching
+    // curriculum + grade. If the client didn't send a curriculum (e.g. teacher
+    // profile hadn't loaded yet), derive it from the creator's profile so the
+    // assignment can NEVER be stored blank and flood students of other curricula.
     let finalCurriculum = curriculum;
     let finalGrade      = grade;
     if (!userId && creatorId && (!finalCurriculum || !finalGrade)) {
@@ -919,10 +943,52 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Class-wide assignments need a curriculum so they only reach the right students. Set your curriculum in your profile or pick a specific student.' });
     }
 
+    // Render the interactive quiz HTML SERVER-SIDE at publish time. The client's
+    // _previewHTML snapshot can be stale — trusting it freezes old bugs into
+    // the assignment.
+    let finalQuizHtml = interactiveQuizHtml || null;
+    let creatorSchool = null;
     let creatorName = null;
     if (creatorId) {
-      const { data: creator } = await supabase.from('users').select('name').eq('id', creatorId).maybeSingle();
+      const { data: creator } = await supabase.from('users').select('school, name').eq('id', creatorId).maybeSingle();
+      creatorSchool = creator?.school || null;
       creatorName = creator?.name || null;
+    }
+    // ── Pre-publish validation gate, server-side defense-in-depth ──
+    // The client validates too, but the server must never persist an interactive
+    // quiz with empty task cards (content lost during extraction) — that ships a
+    // broken worksheet to students. Reject so the teacher re-generates instead.
+    if (interactiveQuiz && Array.isArray(interactiveQuiz.tasks)) {
+      const taskHasContent = (t) => {
+        if (Array.isArray(t.questions) && t.questions.length > 0) return true;
+        if (t.chart && Array.isArray(t.chart.bars) && t.chart.bars.length) return true;
+        if (Array.isArray(t.tables) && t.tables.length) return true;
+        if (t.table && Array.isArray(t.table.rows) && t.table.rows.length) return true;
+        if (Array.isArray(t.pyramids) && t.pyramids.length) return true;
+        if (Array.isArray(t.diagramFillBlanks) && t.diagramFillBlanks.length) return true;
+        if (t._matchTask || t.sharedImage) return true;
+        if (t.passage && String(t.passage).trim()) return true;
+        return false;
+      };
+      if (interactiveQuiz.tasks.length === 0) {
+        return res.status(422).json({ error: 'This quiz has no tasks. Please re-generate the interactive quiz before publishing.' });
+      }
+      const emptyTasks = interactiveQuiz.tasks.filter(t => !taskHasContent(t));
+      if (emptyTasks.length > 0) {
+        const names = emptyTasks.map(t => (t.title || 'Untitled task').replace(/\s+/g, ' ').trim().slice(0, 60)).join('; ');
+        console.warn(`[assignments] BLOCKED publish — empty task cards: ${names}`);
+        return res.status(422).json({ error: `Cannot publish: some tasks are empty (content was not extracted): ${names}. Please re-generate the interactive quiz.` });
+      }
+    }
+
+    if (interactiveQuiz && interactiveQuiz.tasks) {
+      try {
+        const branding = await fetchBranding(creatorSchool, finalCurriculum);
+        // Deep-copy: renderQuizHTML mutates the quiz (normalizers add flags/options)
+        finalQuizHtml = renderQuizHTML(JSON.parse(JSON.stringify(interactiveQuiz)), branding);
+      } catch (e) {
+        console.log('[assignments] server-side quiz render failed, falling back to client HTML:', e.message);
+      }
     }
 
     const { data, error } = await supabase
@@ -935,15 +1001,202 @@ router.post('/', async (req, res) => {
         created_by_id:   creatorId,
         created_by_role: createdByRole,
         created_by_name: creatorName,
+        school:          creatorSchool,
         grade:           finalGrade,
         curriculum:      finalCurriculum,
-        questions:       Array.isArray(questions) ? questions : [],
-        quiz_questions:  Array.isArray(quizQuestions) ? quizQuestions : [],
+        // Store questions as structured objects with expected answers + teacher comments
+        questions: (() => {
+          const qs = Array.isArray(questions) ? questions : [];
+          const answers = typeof questionAnswers === 'object' ? questionAnswers : {};
+          const comments = Array.isArray(teacherComments) ? teacherComments : [];
+          if (Object.keys(answers).length > 0 || comments.length > 0) {
+            return qs.map(q => {
+              const qText = typeof q === 'string' ? q : (q.question || q);
+              const expected = answers[qText] || '';
+              const commentObj = comments.find(c => c.question === qText);
+              return { question: qText, expectedAnswer: expected, comment: commentObj?.comment || '' };
+            });
+          }
+          return qs;
+        })(),
+        document_url:     documentUrl || null,
+        document_urls:    Array.isArray(documentUrls) && documentUrls.length > 0 ? documentUrls : (documentUrl ? [documentUrl] : []),
+        success_criteria: Array.isArray(successCriteria) ? successCriteria : [],
+        task_steps:       Array.isArray(taskSteps) ? taskSteps : [],
+        quiz_questions:   normalizedQuizQuestions,
+        central_idea:     centralIdea || null,
+        lines_of_inquiry: Array.isArray(linesOfInquiry) ? linesOfInquiry : [],
+        learner_profile:  learnerProfile || null,
+        atl_skill:        atlSkill || null,
+        key_concept:      keyConcept || null,
+        interactive_quiz: interactiveQuiz || null,
+        interactive_quiz_html: finalQuizHtml,
       })
       .select()
       .single();
 
     if (error) return res.status(500).json({ error: error.message });
+
+    // Push-notify the targeted student + their parent on mobile (non-blocking).
+    if (userId) {
+      (async () => {
+        try {
+          const { data: stu } = await supabase.from('users').select('email').eq('id', userId).maybeSingle();
+          const { data: links } = await supabase.from('parent_children').select('parent_email').eq('child_id', userId);
+          const emails = [stu?.email, ...((links ?? []).map(l => l.parent_email))].filter(Boolean);
+          if (emails.length) {
+            const label = type === 'quiz' ? 'quiz' : type === 'challenge' ? 'challenge' : 'assignment';
+            const prefKey = type === 'challenge' ? 'challengeUpdates' : 'assignmentAlerts';
+            await sendPush(emails, {
+              title: `New ${label}: ${title}`,
+              body: dueDate ? `Due ${new Date(dueDate).toLocaleDateString()}` : 'Tap to view',
+              data: { type: 'assignment', assignmentId: data.id },
+              prefKey,
+            });
+          }
+        } catch (_) { /* push is best-effort */ }
+      })();
+    }
+
+    // Auto-save interactive quiz to Qdrant for reuse by other teachers
+    if (interactiveQuiz && (interactiveQuiz.tasks || interactiveQuiz.questions)) {
+      (async () => {
+        try {
+          const QUIZ_COLLECTION = 'school_quizzes';
+
+          const { collections } = await qdrantClient.getCollections();
+          if (!collections.some(c => c.name === QUIZ_COLLECTION)) {
+            await qdrantClient.createCollection(QUIZ_COLLECTION, { vectors: { size: 384, distance: 'Cosine' } });
+            for (const f of ['subject', 'grade', 'curriculum', 'school_id', 'status', 'school', 'teacher_name']) {
+              await qdrantClient.createPayloadIndex(QUIZ_COLLECTION, { field_name: f, field_schema: 'keyword' });
+            }
+          }
+
+          const school = creatorSchool || '';
+          const teacherName = creatorName || '';
+          const tasks = interactiveQuiz.tasks || interactiveQuiz.questions || [];
+          const searchText = [
+            title || '',
+            subject || '',
+            finalGrade || '',
+            ...(tasks).flatMap(t => (t.questions || []).map(q => q.question || '')),
+          ].join(' ').substring(0, 1000);
+
+          const vector = await embed(searchText);
+          const quizId = crypto.randomUUID();
+          await qdrantClient.upsert(QUIZ_COLLECTION, {
+            points: [{
+              id: quizId,
+              vector,
+              payload: {
+                title: title || '',
+                subject: subject || '',
+                grade: finalGrade || '',
+                curriculum: finalCurriculum || '',
+                school_id: school || '',
+                teacher_id: creatorId || '',
+                teacher_name: teacherName || '',
+                school: school || '',
+                source_file: interactiveQuiz?.sourceFile || '',
+                status: 'published',
+                created_at: new Date().toISOString(),
+                assignment_id: data.id,
+                quiz_data: (() => { const { _previewHTML, _editMode, ...clean } = interactiveQuiz; return clean; })(),
+              },
+            }],
+            wait: true,
+          });
+        } catch (e) {
+          console.warn('[assignments] Quiz Qdrant save failed (non-fatal):', e.message);
+        }
+      })();
+    }
+
+    // Auto-add deadline to schedule_events (Supabase) so it appears in the
+    // student's calendar. Only when a real due date was set.
+    try {
+      const scheduleStudentId = userId || 'all';
+      const { data: existing } = await supabase
+        .from('schedule_events')
+        .select('id')
+        .eq('assignment_id', data.id)
+        .maybeSingle();
+      if (!existing && dueDate) {
+        const { error: schErr } = await supabase.from('schedule_events').insert({
+          id:           crypto.randomUUID(),
+          title:        `${title} — ${type === 'quiz' ? 'Quiz' : 'Assignment'} due`,
+          event_date:   dueDate,
+          start_time:   '23:59',
+          end_time:     '23:59',
+          type:         'deadline',
+          note:         `${subject}${chapter ? ' · ' + chapter : ''}${finalGrade ? ' · ' + finalGrade : ''}`,
+          student_id:   scheduleStudentId,
+          created_by:   createdByRole || 'teacher',
+          created_by_id: creatorId || null,
+          tag:          subject || null,
+          assignment_id: data.id,
+        });
+        if (schErr) console.error('[assignments] schedule_events insert failed:', schErr.message);
+      }
+    } catch (_) {}
+
+    // Notify parent(s) when an assignment is created.
+    (async () => {
+      try {
+        const assignType = type === 'quiz' ? 'Quiz' : 'Assignment';
+        const dueDateStr = dueDate ? new Date(dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : 'TBD';
+        let creatorEmail = '';
+        if (createdByRole === 'parent') {
+          const raw = String(createdById || '').trim();
+          if (raw.includes('@')) {
+            creatorEmail = raw.toLowerCase();
+          } else if (creatorId) {
+            const { data: cu } = await supabase.from('users').select('email').eq('id', creatorId).maybeSingle();
+            creatorEmail = String(cu?.email || '').toLowerCase().trim();
+          }
+        }
+
+        const notifyParentsOf = async (childId, childName) => {
+          const { data: parents } = await supabase
+            .from('parent_children')
+            .select('parent_email')
+            .eq('child_id', childId);
+          if (!parents || parents.length === 0) return;
+          const msgContent = 'New ' + assignType + ' assigned: "' + title + '" (' + (subject || 'General') + ') has been assigned to ' + (childName || 'your child') + '. Due: ' + dueDateStr + '.';
+          for (const { parent_email } of parents) {
+            if (creatorEmail && String(parent_email || '').toLowerCase().trim() === creatorEmail) continue;
+            await supabase.from('messages').insert({
+              sender_email:    'system@aivorah.com',
+              sender_name:     'Aivorah',
+              sender_role:     'teacher',
+              recipient_email: parent_email,
+              recipient_name:  parent_email,
+              content:         msgContent,
+            });
+          }
+        };
+
+        if (userId) {
+          const { data: student } = await supabase.from('users').select('name').eq('id', userId).maybeSingle();
+          await notifyParentsOf(userId, student?.name || 'your child');
+        } else if (creatorId && finalGrade) {
+          const norm = (g) => String(g || '').toLowerCase().replace(/grade/g, '').replace(/\s+/g, '').trim();
+          const { data: links } = await supabase.from('teacher_student').select('student_id').eq('teacher_id', creatorId);
+          const studentIds = [...new Set((links || []).map(l => l.student_id).filter(Boolean))];
+          if (studentIds.length > 0) {
+            const { data: studs } = await supabase.from('users').select('id, name, grade, curriculum').in('id', studentIds);
+            const targets = (studs || []).filter(s =>
+              norm(s.grade) === norm(finalGrade) &&
+              (!finalCurriculum || !s.curriculum || s.curriculum === finalCurriculum)
+            );
+            for (const s of targets) await notifyParentsOf(s.id, s.name);
+          }
+        }
+      } catch (e) {
+        console.warn('[assignments] Parent notification failed (non-fatal):', e.message);
+      }
+    })();
+
     return res.json(normalise(data));
   } catch (err) {
     return res.status(500).json({ error: err.message });
