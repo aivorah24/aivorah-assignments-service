@@ -11,6 +11,7 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'aivorah-ass
 app.use('/assignments', require('./routes/assignments'));
 app.use('/curriculum', require('./routes/curriculum'));
 app.use('/jobs', require('./routes/jobs'));
+app.use('/quiz', require('./routes/quiz'));
 
 require('./services/jobHandlers'); // register the worksheet_extract handler
 

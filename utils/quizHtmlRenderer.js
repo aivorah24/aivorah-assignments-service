@@ -2458,4 +2458,97 @@ function renderQuizHTML(quiz, branding = {}) {
 </html>`;
 }
 
-module.exports = { renderQuizHTML, solveVerticalMath, normalizeVennQuestions, renderBarChart, stripImagesForStructuredTasks };
+// ── Post-generation quiz normalizers ─────────────────────────────────────
+// Ported from ai-mentor/server/routes/quiz.js (2026-09-11, B05) for
+// POST /quiz/render-preview and POST /quiz/normalize. All seven are pure,
+// deterministic, synchronous JS transforms on the quiz JSON — zero external
+// calls (no Gemini/Groq/Cloudinary) — verified by reading every line before
+// porting. Deliberately NOT ported in this batch: recoverBarCharts (a Gemini
+// vision call that re-reads a bar-graph image when the LLM's own extraction
+// pass omitted the structured chart data) — worksheets that need it degrade
+// gracefully to showing the raw scanned image instead of an interactive
+// chart, rather than a broken render; picked up as a separate, explicitly
+// scoped follow-up given it needs its own Gemini-vision-dependent test
+// strategy, unlike everything else here.
+
+function sanitizeDuplicateQuestionIds(quiz) {
+  for (const task of (quiz.tasks || [])) {
+    const seenIds = new Set();
+    const allQs = task.questions || [];
+    for (const q of allQs) {
+      if (!q.id) {
+        q.id = Math.random().toString(36).substring(7);
+      }
+      if (seenIds.has(q.id)) {
+        const baseId = q.id;
+        let counter = 2;
+        while (seenIds.has(`${baseId}_${counter}`)) {
+          counter++;
+        }
+        const newId = `${baseId}_${counter}`;
+
+        const colGroups = task.layout?.columnGroups || [];
+        for (let gIdx = colGroups.length - 1; gIdx >= 0; gIdx--) {
+          const group = colGroups[gIdx];
+          const qIds = group.questionIds || [];
+          const idx = qIds.lastIndexOf(baseId);
+          if (idx !== -1) {
+            qIds[idx] = newId;
+            break;
+          }
+        }
+        q.id = newId;
+      }
+      seenIds.add(q.id);
+    }
+  }
+}
+
+// ── Post-process: auto-detect MCQ questions the LLM returned as text ──────
+function autoDetectMCQ(quiz) {
+  sanitizeDuplicateQuestionIds(quiz);
+  for (const task of (quiz.tasks || [])) {
+    const title = (task.title || '').toLowerCase();
+    const isMcqTask = /tick|choose|circle.*correct|select.*option|multiple.*choice/i.test(title);
+
+    for (const q of (task.questions || [])) {
+      if (q.type === 'mcq' && Array.isArray(q.options) && q.options.length > 0) continue;
+
+      const qText = q.question || '';
+
+      const parenMatch = qText.match(/\(([^)]+\/[^)]+)\)/);
+      if (parenMatch && (isMcqTask || /tick|choose|circle|select/i.test(qText))) {
+        const rawOpts = parenMatch[1].split('/').map(s => s.trim()).filter(Boolean);
+        if (rawOpts.length >= 2) {
+          q.type = 'mcq';
+          q.options = rawOpts.map(label => {
+            const isCorrect = String(q.answer).toLowerCase().trim() === label.toLowerCase().trim();
+            return { label, correct: isCorrect };
+          });
+          q.question = qText.replace(parenMatch[0], '').replace(/\s+$/, '').replace(/:\s*$/, ':');
+          continue;
+        }
+      }
+
+      if (isMcqTask && q.type !== 'mcq' && q.type !== 'activity') {
+        const abcMatch = qText.match(/\ba\)\s*(.+?)\s+b\)\s*(.+?)(?:\s+c\)\s*(.+?))?(?:\s+d\)\s*(.+?))?$/i);
+        if (abcMatch) {
+          const rawOpts = [abcMatch[1], abcMatch[2], abcMatch[3], abcMatch[4]].filter(Boolean).map(s => s.trim());
+          if (rawOpts.length >= 2) {
+            q.type = 'mcq';
+            q.options = rawOpts.map(label => ({
+              label,
+              correct: String(q.answer).toLowerCase().trim() === label.toLowerCase().trim()
+            }));
+            q.question = qText.replace(abcMatch[0], '').trim();
+          }
+        }
+      }
+    }
+  }
+}
+
+module.exports = {
+  renderQuizHTML, solveVerticalMath, normalizeVennQuestions, renderBarChart, stripImagesForStructuredTasks,
+  autoDetectMCQ, normalizeMatchingTasks, normalizeRiddleTables, normalizeLetterGridTables, normalizeTables, normalizeCharts,
+};
