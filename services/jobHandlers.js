@@ -1,7 +1,7 @@
-// Ported from ai-mentor/server/services/jobHandlers.js — only the
-// 'worksheet_extract' handler this service actually needs (extraction is
-// the only queued job type migrated here; quiz_generate/syllabus_extract
-// stay on the monolith for now, out of scope for this migration).
+// Ported from ai-mentor/server/services/jobHandlers.js — 'worksheet_extract'
+// and 'quiz_generate' (2026-09-11, quiz AI-pipeline migration — see
+// QUIZ_PIPELINE_MIGRATION.md); syllabus_extract stays on the monolith,
+// out of scope for this migration.
 const { registerHandler } = require('./jobQueue');
 
 // Real worksheet-extraction job — lets a teacher fire off several worksheet
@@ -11,6 +11,16 @@ const { registerHandler } = require('./jobQueue');
 registerHandler('worksheet_extract', async (payload) => {
   const { extractWorksheetContent } = require('../routes/assignments');
   return extractWorksheetContent(payload.fileList);
+});
+
+// Real quiz-generation job — reuses the exact same Gemini-vision function as
+// the synchronous POST /quiz/generate, so the queued path can never drift
+// from what the synchronous endpoint does.
+registerHandler('quiz_generate', async (payload) => {
+  const { generateQuizFromPdf } = require('./quizVision');
+  const buffer = Buffer.from(payload.fileBase64, 'base64');
+  const quiz = await generateQuizFromPdf(buffer, { grade: payload.grade, subject: payload.subject, school: payload.school });
+  return { quiz };
 });
 
 module.exports = {};

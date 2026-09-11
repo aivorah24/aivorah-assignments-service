@@ -31,7 +31,13 @@ async function geminiRetry(fn, { tries = 6, base = 2500 } = {}) {
       const is429 = /429|too many requests|quota|resource_exhausted|rate.?limit/i.test(msg);
       const is503 = /503|overloaded|unavailable/i.test(msg);
       lastErr = e;
-      if (is429 && /PerDay|per.?day|daily/i.test(msg)) throw e;
+      // A permanent-billing 429 (daily quota, OR the account itself has no
+      // funds/credits left) can't recover by waiting — retrying just holds
+      // the request open until a proxy timeout kills it instead of returning
+      // a real error. Verified live: a "prepayment credits are depleted" 429
+      // isn't a daily-quota message but is exactly as unrecoverable, and the
+      // narrower daily-only check let it retry for ~88s before failing.
+      if (is429 && /PerDay|per.?day|daily|prepayment|credits?\s+(are\s+)?depleted|billing|insufficient.?(funds|balance)/i.test(msg)) throw e;
       if ((!is429 && !is503) || i === tries - 1) throw e;
       const suggested = msg.match(/retry.?after[^\d]*(\d+)/i) || msg.match(/retryDelay["\s:]+(\d+)/i);
       const wait = suggested ? parseInt(suggested[1], 10) * 1000
@@ -51,6 +57,16 @@ function geminiImageParts(imageBuffers) {
   return imageBuffers.map(({ buffer, mime }) => ({
     inlineData: { mimeType: mime || 'image/png', data: buffer.toString('base64') },
   }));
+}
+
+// Gemini 2.5 Flash reads PDFs natively (multi-page) via inlineData, same as
+// an image part. High-DPI per-page rasterization (what the monolith does as
+// an accuracy enhancement on top of this) is a separate, later increment —
+// sending the raw PDF directly is what the monolith itself falls back to
+// when rasterization isn't available, so this is a real, working path, not
+// a stub.
+function geminiPdfPart(pdfBuffer) {
+  return { inlineData: { mimeType: 'application/pdf', data: pdfBuffer.toString('base64') } };
 }
 
 function buildQuizVisionPrompt({ grade, subject, school } = {}) {
@@ -218,24 +234,36 @@ async function callGeminiVision(parts, { grade, subject, school } = {}) {
   return geminiGenerate(model, [...parts, { text: prompt }]);
 }
 
+function parseQuizResponse(raw) {
+  try {
+    return JSON.parse(cleanLLMJson(raw));
+  } catch {
+    const err = new Error('AI returned invalid JSON');
+    err.raw = raw;
+    throw err;
+  }
+}
+
 // Increment 1: single image → quiz JSON. No OCR cross-validation, no diagram
 // matching, no answer-verification, no fallback chain — see
 // QUIZ_PIPELINE_MIGRATION.md for what's still pending.
 async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school } = {}) {
   const parts = geminiImageParts([{ buffer: imageBuffer, mime }]);
   const raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
-  let quiz;
-  try {
-    quiz = JSON.parse(cleanLLMJson(raw));
-  } catch {
-    const err = new Error('AI returned invalid JSON');
-    err.raw = raw;
-    throw err;
-  }
-  return quiz;
+  return parseQuizResponse(raw);
+}
+
+// Increment 8 (partial — PDF path only, no high-DPI page rasterization yet):
+// a PDF (or a docx already converted to PDF upstream via docx-to-pdf) → quiz
+// JSON, same Gemini-only path as generateQuizFromImage. Powers both the sync
+// /quiz/generate route and the queued /quiz/generate-async job.
+async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
+  const parts = [geminiPdfPart(pdfBuffer)];
+  const raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+  return parseQuizResponse(raw);
 }
 
 module.exports = {
-  generateQuizFromImage, callGeminiVision, buildQuizVisionPrompt, cleanLLMJson,
-  geminiImageParts, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, buildQuizVisionPrompt, cleanLLMJson,
+  geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };

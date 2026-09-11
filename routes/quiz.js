@@ -22,7 +22,8 @@ const {
   renderQuizHTML, autoDetectMCQ, normalizeMatchingTasks, normalizeVennQuestions,
   normalizeRiddleTables, normalizeLetterGridTables, normalizeTables, normalizeCharts,
 } = require('../utils/quizHtmlRenderer');
-const { generateQuizFromImage } = require('../services/quizVision');
+const { generateQuizFromImage, generateQuizFromPdf } = require('../services/quizVision');
+const { publishJob } = require('../services/jobQueue');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -97,6 +98,42 @@ router.post('/generate-image', upload.single('image'), async (req, res) => {
       return res.status(500).json({ error: err.message, raw: err.raw });
     }
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /quiz/generate — PDF (docx already converted upstream via
+// docx-to-pdf) → quiz JSON, Gemini vision only. Same increment-1-level scope
+// as /generate-image: no OCR cross-validation, no diagram extraction, no
+// answer-verification, no multi-vendor fallback, no high-DPI page
+// rasterization — sends the raw PDF to Gemini directly (Gemini 2.5 Flash
+// reads multi-page PDFs natively). See QUIZ_PIPELINE_MIGRATION.md.
+router.post('/generate', upload.single('pdf'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No PDF file uploaded' });
+    const { grade, subject, school } = req.body;
+    const quiz = await generateQuizFromPdf(req.file.buffer, { grade, subject, school });
+    res.json({ quiz });
+  } catch (err) {
+    if (err.message === 'AI returned invalid JSON') {
+      return res.status(500).json({ error: err.message, raw: err.raw });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /quiz/generate-async — same as /generate, queued so the browser
+// tab doesn't hold one connection open for the whole AI generation pipeline.
+router.post('/generate-async', express.json({ limit: '10mb' }), async (req, res) => {
+  const { fileBase64, mimeType, filename, grade, subject, school } = req.body || {};
+  if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
+  try {
+    const { jobId } = await publishJob('quiz_generate', {
+      fileBase64, mimeType: mimeType || 'application/pdf', filename: filename || 'worksheet.pdf',
+      grade, subject, school,
+    });
+    res.json({ jobId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
