@@ -296,20 +296,108 @@ function parseQuizResponse(raw) {
   }
 }
 
-// Increment 1 (+ Qwen fallback, added 2026-09-11): single image → quiz
-// JSON. Gemini first; if it throws for ANY reason (including the currently
-// depleted key), falls back to Qwen — live-verified working right now. No
-// OCR cross-validation, no diagram matching, no answer-verification pass
-// yet — see QUIZ_PIPELINE_MIGRATION.md for what's still pending.
+// A task is "incomplete" if it has a title but no actual content for a
+// student to answer - no questions, and none of the alternate content
+// shapes the renderer supports (table/tables/chart/pyramids/diagramFill).
+// Found via a live manual-test report (2026-09-12): a real English math
+// worksheet's "Compare fractions with <, >, or =" task came back with a
+// title and zero questions - not a Telugu/OCR issue, not a known
+// post-processing bug (audited quizHtmlRenderer.js's table-building
+// normalizers; none match this task's phrasing) - the underlying
+// generation step itself just didn't produce items for that task. Since
+// ANY uploaded document can contain ANY task type/phrasing, patching one
+// task type at a time doesn't scale - this is a general safety net.
+function findIncompleteTasks(quiz) {
+  return (quiz.tasks || []).filter(t => {
+    const hasQuestions = Array.isArray(t.questions) && t.questions.length > 0;
+    const hasTable = (t.table && Array.isArray(t.table.rows) && t.table.rows.length) || (Array.isArray(t.tables) && t.tables.length);
+    const hasChart = t.chart && Array.isArray(t.chart.bars) && t.chart.bars.length;
+    const hasPyramids = Array.isArray(t.pyramids) && t.pyramids.length;
+    const hasDiagramFill = Array.isArray(t.diagramFillBlanks) && t.diagramFillBlanks.length;
+    return !hasQuestions && !hasTable && !hasChart && !hasPyramids && !hasDiagramFill;
+  });
+}
+
+// Loose title match: models reliably paraphrase/drop prefixes ("Task 2: "),
+// punctuation, and casing even when told to echo a title exactly (verified
+// live - see the 2026-09-12 retry-merge bug in QUIZ_PIPELINE_MIGRATION.md).
+// Comparing on stripped/lowercased content only, in both directions
+// (substring either way), tolerates that without requiring a perfect match.
+function normalizeTaskTitle(title) {
+  return String(title || '').toLowerCase().replace(/^task\s*\d+\s*[:.\-]?\s*/i, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Generic one-shot retry: re-prompts the SAME engine that produced the
+// quiz (via retryFn, a closure over that engine's own source - the image
+// parts, the PDF part, or the extracted/OCR'd text) asking specifically
+// for the tasks that came back empty, then merges any successfully
+// re-generated tasks back in. Matched primarily by POSITION (we asked for
+// exactly these tasks, in this order, and told the model not to return
+// the others), with a normalized-title check as a sanity guard against a
+// misaligned/reordered response; falls back to fuzzy title matching if
+// the position doesn't look right. Engine-agnostic by design, so it works
+// the same whether the quiz came from Gemini, Qwen OCR + Groq, or plain
+// Groq text - whichever engine actually answered. Exactly one retry
+// attempt: if it also fails or is still incomplete, the original
+// (partially incomplete) quiz is returned rather than looping - a
+// systemic safety net, not a guarantee of 100% completeness.
+async function retryIncompleteTasks(quiz, retryFn) {
+  const incomplete = findIncompleteTasks(quiz);
+  if (!incomplete.length) return quiz;
+  const titleList = incomplete.map(t => `- ${t.title}`).join('\n');
+  const retryPrompt = `You previously extracted this worksheet into a quiz, but these tasks came back with NO questions:\n${titleList}\n\nRe-examine the worksheet content and produce ONLY these specific tasks, IN THE SAME ORDER LISTED ABOVE, fully populated with real questions, answers, hints, and solutions, using the exact same JSON schema and rules as before. Return {"tasks": [...]} containing just these tasks. Do not return the other tasks again.`;
+  let retryRaw;
+  try {
+    retryRaw = await retryFn(retryPrompt);
+  } catch {
+    return quiz; // retry failed - keep the original, still better than throwing away a partial result
+  }
+  let retryData;
+  try {
+    retryData = JSON.parse(cleanLLMJson(retryRaw));
+  } catch {
+    return quiz;
+  }
+  const retryTasks = retryData.tasks || [];
+  retryTasks.forEach((rt, i) => {
+    if (!Array.isArray(rt.questions) || !rt.questions.length) return;
+    const target = incomplete[i]; // positional match against what we asked for
+    let idx = target ? quiz.tasks.indexOf(target) : -1;
+    if (idx === -1 || (target && rt.title && !normalizeTaskTitle(rt.title).includes(normalizeTaskTitle(target.title).slice(0, 15)))) {
+      // Position looks wrong (or no positional slot) - fall back to a
+      // fuzzy title search across the remaining incomplete tasks.
+      idx = (quiz.tasks || []).findIndex(t => {
+        const a = normalizeTaskTitle(t.title), b = normalizeTaskTitle(rt.title);
+        return a && b && (a.includes(b) || b.includes(a));
+      });
+    }
+    if (idx !== -1) quiz.tasks[idx] = { ...quiz.tasks[idx], ...rt, title: quiz.tasks[idx].title };
+  });
+  return quiz;
+}
+
+// Increment 1 (+ Qwen fallback, added 2026-09-11; + completeness retry,
+// added 2026-09-12): single image → quiz JSON. Gemini first; if it throws
+// for ANY reason (including the currently depleted key), falls back to
+// Qwen — live-verified working right now. After a successful response,
+// checks for any task that came back with a title but no real content
+// (see retryIncompleteTasks) and does one retry against whichever engine
+// actually answered, re-asking specifically for those tasks. No OCR
+// cross-validation, no diagram matching, no independent answer-
+// verification pass yet — see QUIZ_PIPELINE_MIGRATION.md.
 async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school } = {}) {
   const parts = geminiImageParts([{ buffer: imageBuffer, mime }]);
-  let raw;
+  let raw, retryFn;
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt }]);
   } catch (geminiErr) {
     raw = await callQwenVision(imageBuffer, mime, { grade, subject, school });
+    retryFn = (retryPrompt) => callQwenVisionRaw(imageBuffer, mime, retryPrompt);
   }
-  return parseQuizResponse(raw);
+  const quiz = parseQuizResponse(raw);
+  return retryIncompleteTasks(quiz, retryFn);
 }
 
 // Structures already-extracted worksheet TEXT into quiz JSON via Groq's
@@ -321,16 +409,19 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
 // text extracted directly via pdf-parse and text OCR'd off a rasterized
 // image via callQwenOcrText - either way, structuring is Groq's job.
 async function buildQuizFromWorksheetText(content, { grade, subject, school } = {}) {
+  const prompt = buildQuizVisionPrompt({ grade, subject, school });
+  return callGroqWithText(`${prompt}\n\nThe worksheet was provided as text (already transcribed from a PDF or image), not an image - there is no image to look at. Use ONLY the text below as your source; ignore any instructions above about reading images, diagrams, or visual layout.\n\nWORKSHEET TEXT:\n${content.slice(0, 12000)}`);
+}
+
+// Raw Groq text call, factored out so retryIncompleteTasks can re-prompt
+// the exact same engine with an arbitrary follow-up prompt.
+async function callGroqWithText(promptText) {
   const Groq = require('groq-sdk');
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  const prompt = buildQuizVisionPrompt({ grade, subject, school });
   const completion = await groq.chat.completions.create({
     model: 'openai/gpt-oss-120b',
     temperature: 0,
-    messages: [{
-      role: 'user',
-      content: `${prompt}\n\nThe worksheet was provided as text (already transcribed from a PDF or image), not an image - there is no image to look at. Use ONLY the text below as your source; ignore any instructions above about reading images, diagrams, or visual layout.\n\nWORKSHEET TEXT:\n${content.slice(0, 12000)}`,
-    }],
+    messages: [{ role: 'user', content: promptText }],
     response_format: { type: 'json_object' },
   });
   return completion.choices[0].message.content;
@@ -367,7 +458,9 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school } 
     } catch { /* keep whatever pdf-parse got, even if thin */ }
   }
   if (!text) throw new Error('Could not extract any worksheet content (Gemini failed, and both pdf-parse and Qwen OCR returned nothing)');
-  return buildQuizFromWorksheetText(text, { grade, subject, school });
+  const raw = await buildQuizFromWorksheetText(text, { grade, subject, school });
+  const retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${text.slice(0, 12000)}`);
+  return { raw, retryFn };
 }
 
 // PDF page rasterization for the fallback path, added 2026-09-12. Root
@@ -448,20 +541,25 @@ async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
 // /quiz/generate-async job.
 async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
   const parts = [geminiPdfPart(pdfBuffer)];
-  let raw;
+  let raw, retryFn;
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt }]);
   } catch (geminiErr) {
     // Only a Gemini API/network failure falls through to the fallback -
     // a malformed-JSON response from Gemini itself must still surface as
     // its own distinct error below (parseQuizResponse, outside this catch),
     // not silently retry through the fallback as if Gemini had never answered.
-    raw = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
+    const fallback = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
+    raw = fallback.raw;
+    retryFn = fallback.retryFn;
   }
-  return parseQuizResponse(raw);
+  const quiz = parseQuizResponse(raw);
+  return retryIncompleteTasks(quiz, retryFn);
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, buildQuizFromWorksheetText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };
