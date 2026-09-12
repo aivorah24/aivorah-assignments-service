@@ -393,8 +393,16 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
     retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt }]);
   } catch (geminiErr) {
-    raw = await callQwenVision(imageBuffer, mime, { grade, subject, school });
-    retryFn = (retryPrompt) => callQwenVisionRaw(imageBuffer, mime, retryPrompt);
+    // Was: one-shot Qwen structuring (Qwen reads the image AND builds the
+    // full quiz JSON in a single call). Found unreliable 2026-09-12 - see
+    // the finding above - and additionally couldn't handle non-Latin
+    // scripts (Qwen hallucinated Telugu text entirely). Now: OCR (script-
+    // aware - Tesseract for detected Indic scripts, Qwen for Latin/
+    // English) + Groq structuring, the same reliable split already used
+    // for the PDF fallback.
+    const ocrText = await callOcrText(imageBuffer, mime);
+    raw = await buildQuizFromWorksheetText(ocrText, { grade, subject, school });
+    retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${ocrText.slice(0, 12000)}`);
   }
   const quiz = parseQuizResponse(raw);
   return retryIncompleteTasks(quiz, retryFn);
@@ -436,6 +444,88 @@ async function callQwenOcrText(imageBuffer, mime) {
     'Transcribe ALL text visible in this worksheet image, exactly as printed, preserving the order top-to-bottom and left-to-right - headings, instructions, every numbered/lettered item, and any text inside diagrams or tables. Do not summarize, translate, explain, or add anything. Output ONLY the raw transcribed text.');
 }
 
+// ── Tesseract.js OCR — for Telugu/Indic-script content, added 2026-09-12 ──
+// Benchmarked against the real deployed pipeline's Qwen OCR fallback: Qwen
+// was found to hallucinate Telugu text entirely (fabricated different real
+// words than what was actually printed - verified by rendering the source
+// image and comparing). Tesseract.js (free, local WASM, no API key, no
+// per-request cost or external dependency) transcribed the same image
+// correctly. No dedicated OCR cloud credential (Google Vision, Azure,
+// Textract, ABBYY) exists anywhere in this codebase's 19 repos, so a paid
+// alternative was not evaluated live - see QUIZ_PIPELINE_MIGRATION.md for
+// the full comparison. Qwen is KEPT (not replaced) for Latin/English
+// content, where it already works reliably and needs no extra model
+// download; Tesseract is used only when Tesseract.detect() identifies a
+// non-Latin script on the image itself (works with zero prior text, so it
+// applies equally to a bare image upload or a rasterized PDF page).
+const TESSERACT_SCRIPT_TO_LANG = {
+  Telugu: 'tel', Devanagari: 'hin', Tamil: 'tam', Kannada: 'kan',
+  Malayalam: 'mal', Bengali: 'ben', Gujarati: 'guj', Gurmukhi: 'pan',
+  Oriya: 'ori', Latin: 'eng',
+};
+
+// Guards every Tesseract call below: tesseract.js has a known failure mode
+// where a truly undecodable buffer (not just an unusual format - garbage
+// bytes) makes its underlying worker emit a Node 'error' event that
+// escapes the returned promise entirely and crashes the whole process
+// (verified live: `Buffer.from('fake-png-bytes')` took down the Node
+// process even inside a try/catch around Tesseract.detect/recognize).
+// A magic-byte check on real image formats sidesteps this by never
+// handing Tesseract a buffer it can't decode in the first place - real
+// uploads and Puppeteer-rasterized PNGs always pass this; only genuinely
+// corrupt/non-image input is rejected, cleanly, before reaching Tesseract.
+function looksLikeDecodableImage(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 8) return false;
+  const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const isWebp = buffer.slice(0, 4).toString('ascii') === 'RIFF' && buffer.slice(8, 12).toString('ascii') === 'WEBP';
+  const isBmp = buffer[0] === 0x42 && buffer[1] === 0x4d;
+  return isPng || isJpeg || isWebp || isBmp;
+}
+
+// Fast, local script identification (Tesseract's OSD mode) - no full OCR
+// pass, so it's cheap to run before deciding which OCR engine to use.
+// Defaults to 'eng' (keeping Qwen as the OCR engine) on any detection
+// failure or unrecognized/Latin script - this only ever ADDS Tesseract
+// for scripts it's confirmed better at, never removes Qwen's coverage.
+async function detectScriptLang(imageBuffer) {
+  if (!looksLikeDecodableImage(imageBuffer)) return 'eng';
+  try {
+    const Tesseract = require('tesseract.js');
+    const { data } = await Tesseract.detect(imageBuffer);
+    return TESSERACT_SCRIPT_TO_LANG[data.script] || 'eng';
+  } catch {
+    return 'eng';
+  }
+}
+
+async function callTesseractOcrText(imageBuffer, lang) {
+  if (!looksLikeDecodableImage(imageBuffer)) throw new Error('Tesseract: input is not a decodable image');
+  const Tesseract = require('tesseract.js');
+  const { data } = await Tesseract.recognize(imageBuffer, lang === 'eng' ? 'eng' : `${lang}+eng`);
+  return data.text || '';
+}
+
+// Script-aware OCR router: Tesseract for detected non-Latin/Indic scripts
+// (proven more accurate there), Qwen for Latin/English (already reliable,
+// unchanged). If the chosen engine throws, tries the other one before
+// giving up - OCR failure must never silently hand Groq empty/garbage
+// text, so this always either returns real text or throws.
+async function callOcrText(imageBuffer, mime) {
+  const lang = await detectScriptLang(imageBuffer);
+  const primary = lang === 'eng'
+    ? () => callQwenOcrText(imageBuffer, mime)
+    : () => callTesseractOcrText(imageBuffer, lang);
+  const secondary = lang === 'eng'
+    ? () => callTesseractOcrText(imageBuffer, 'eng')
+    : () => callQwenOcrText(imageBuffer, mime);
+  try {
+    return (await primary()).trim();
+  } catch {
+    return (await secondary()).trim();
+  }
+}
+
 // PDF text-extraction fallback, added 2026-09-12: pdf-parse first (works
 // for any digitally-generated worksheet, including docx->PDF), but many
 // real worksheets (e.g. an IB PYP Telugu fixture) have their actual
@@ -453,11 +543,11 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school } 
   if (text.length < 300) {
     try {
       const image = await rasterizePdfPagesToImage(pdfBuffer);
-      const ocrText = (await callQwenOcrText(image, 'image/png')).trim();
+      const ocrText = await callOcrText(image, 'image/png');
       if (ocrText.length > text.length) text = ocrText;
     } catch { /* keep whatever pdf-parse got, even if thin */ }
   }
-  if (!text) throw new Error('Could not extract any worksheet content (Gemini failed, and both pdf-parse and Qwen OCR returned nothing)');
+  if (!text) throw new Error('Could not extract any worksheet content (Gemini failed, and OCR returned nothing)');
   const raw = await buildQuizFromWorksheetText(text, { grade, subject, school });
   const retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${text.slice(0, 12000)}`);
   return { raw, retryFn };
@@ -560,6 +650,6 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };

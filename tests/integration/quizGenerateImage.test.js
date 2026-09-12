@@ -15,6 +15,11 @@ jest.mock('@google/generative-ai', () => ({
   })),
 }));
 
+const mockGroqCreate = jest.fn();
+jest.mock('groq-sdk', () => jest.fn().mockImplementation(() => ({
+  chat: { completions: { create: (...args) => mockGroqCreate(...args) } },
+})));
+
 const request = require('supertest');
 
 function geminiJsonResponse(obj) {
@@ -99,45 +104,73 @@ describe('POST /quiz/generate-image — real failure handling', () => {
   });
 });
 
-describe('POST /quiz/generate-image — Qwen fallback when Gemini fails', () => {
-  // Live-verified 2026-09-11: with the only available Gemini key depleted,
-  // this fallback is what actually produces a real quiz right now. Gemini's
-  // own retry/fast-fail behavior (geminiRetry) is covered separately in
-  // quizVision's own concerns — these tests are about the fallback wiring:
-  // does a Gemini failure of any kind actually hand off to Qwen, and is the
-  // combined-failure case still a clean error, not a hang or a crash.
+describe('POST /quiz/generate-image — OCR + Groq-structuring fallback when Gemini fails', () => {
+  // Was: Qwen did full one-shot structuring on Gemini failure. Found
+  // unreliable 2026-09-12 (empty tasks/questions on real worksheets) and
+  // unable to handle non-Latin scripts (Qwen hallucinated Telugu text
+  // entirely) - replaced with script-aware OCR (Tesseract for detected
+  // Indic scripts, Qwen for Latin/English - see callOcrText in
+  // quizVision.js) + Groq structuring, same as the PDF fallback. A real
+  // (if tiny) PNG is required here since the OCR step now validates the
+  // image is decodable before calling Tesseract at all - a hard-learned
+  // requirement: tesseract.js can crash the whole Node process on truly
+  // undecodable input (verified live), so garbage bytes are now rejected
+  // safely up front rather than reaching Tesseract.
+  const TINY_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
   let app;
+  const realFetch = global.fetch;
   beforeAll(() => { app = require('../../index'); });
-  beforeEach(() => mockGenerateContent.mockReset());
+  beforeEach(() => { mockGenerateContent.mockReset(); mockGroqCreate.mockReset(); });
+  afterEach(() => { global.fetch = realFetch; });
 
-  test('a real daily-quota Gemini failure falls back to Qwen, which succeeds', async () => {
+  test('a real daily-quota Gemini failure falls back to OCR (Qwen, for this Latin-script image) + Groq structuring, which succeeds', async () => {
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ choices: [{ message: { content: JSON.stringify({ title: 'Qwen Read This', tasks: [] }) } }] }),
+      json: async () => ({ choices: [{ message: { content: 'Task 1: Solve.\na) 2 + 2 = ___' } }] }),
     });
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From OCR Text', tasks: [] }) } }] });
 
     const res = await request(app)
       .post('/quiz/generate-image')
-      .attach('image', Buffer.from('fake-png-bytes'), { filename: 'worksheet.png', contentType: 'image/png' });
+      .attach('image', TINY_PNG, { filename: 'worksheet.png', contentType: 'image/png' });
 
     expect(res.status).toBe(200);
-    expect(res.body.quiz.title).toBe('Qwen Read This');
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://router.huggingface.co/v1/chat/completions',
-      expect.objectContaining({ method: 'POST' })
-    );
-  });
+    expect(res.body.quiz.title).toBe('Structured From OCR Text');
+    expect(global.fetch).toHaveBeenCalledWith('https://router.huggingface.co/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
+    expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
+  }, 30000);
 
-  test('a real Gemini failure with Qwen ALSO failing (e.g. HF router down) surfaces the Qwen error, not a hang', async () => {
+  test('a real Gemini failure with Qwen OCR also failing surfaces a clean error, not a hang or a crash', async () => {
+    // Qwen fails; Tesseract (the secondary engine here) can still run on
+    // this real, if trivial, 1x1 PNG without crashing - it just won't find
+    // real text, so structuring an effectively-empty transcription still
+    // ends in a clean error rather than a hang. The crash-safety property
+    // (a genuinely undecodable buffer never reaching Tesseract) is covered
+    // by the dedicated test below.
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
-    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, text: async () => 'Service Unavailable' });
+    global.fetch = jest.fn().mockRejectedValue(new Error('HF router down'));
 
     const res = await request(app)
       .post('/quiz/generate-image')
-      .attach('image', Buffer.from('fake-png-bytes'), { filename: 'worksheet.png', contentType: 'image/png' });
+      .attach('image', TINY_PNG, { filename: 'worksheet.png', contentType: 'image/png' });
 
     expect(res.status).toBe(500);
-    expect(res.body.error).toMatch(/HF router 503/);
-  });
+    expect(typeof res.body.error).toBe('string');
+  }, 30000);
+
+  test('a genuinely undecodable "image" (corrupt upload) fails cleanly without crashing the process', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    // Qwen (the primary OCR engine for the 'eng' default) is also
+    // deliberately made to fail here, so the secondary engine (Tesseract)
+    // is actually reached and its own magic-byte guard is exercised -
+    // that guard is the point of this test, not Qwen's behavior.
+    global.fetch = jest.fn().mockRejectedValue(new Error('should not reach real network'));
+    const res = await request(app)
+      .post('/quiz/generate-image')
+      .attach('image', Buffer.from('not a real image at all'), { filename: 'worksheet.png', contentType: 'image/png' });
+
+    expect(res.status).toBe(500);
+    expect(typeof res.body.error).toBe('string');
+  }, 30000);
 });
