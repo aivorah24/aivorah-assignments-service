@@ -562,19 +562,25 @@ async function callTesseractOcrText(imageBuffer, lang) {
   return data.text || '';
 }
 
-// Script-aware OCR router: Tesseract for detected non-Latin/Indic scripts
-// (proven more accurate there), Qwen for Latin/English (already reliable,
-// unchanged). If the chosen engine throws, tries the other one before
-// giving up - OCR failure must never silently hand Groq empty/garbage
-// text, so this always either returns real text or throws.
+// OCR router - Tesseract is now PRIMARY for every script, English
+// included, with Qwen as an opportunistic secondary. Changed 2026-09-12
+// after live testing found Qwen's HuggingFace router returning
+// "You have depleted your monthly included credits" in production - an
+// availability failure, not just the Telugu accuracy problem found
+// earlier. Tesseract has no quota/billing dependency at all (local WASM),
+// and was independently verified highly accurate on a real English
+// worksheet fixture in the same test pass (correctly read task titles,
+// numeric measurements, and instructions - only minor noise on a
+// diagram-heavy region, not on real text). Qwen is kept as a secondary
+// only in case Tesseract itself fails on a given image; if Qwen's quota
+// is still depleted when that happens, callOcrText simply throws instead
+// of silently returning nothing, which is the correct behavior per the
+// "OCR failure must be handled safely" requirement - a genuinely bad
+// result should fail visibly, not produce a confident wrong quiz.
 async function callOcrText(imageBuffer, mime) {
   const lang = await detectScriptLang(imageBuffer);
-  const primary = lang === 'eng'
-    ? () => callQwenOcrText(imageBuffer, mime)
-    : () => callTesseractOcrText(imageBuffer, lang);
-  const secondary = lang === 'eng'
-    ? () => callTesseractOcrText(imageBuffer, 'eng')
-    : () => callQwenOcrText(imageBuffer, mime);
+  const primary = () => callTesseractOcrText(imageBuffer, lang);
+  const secondary = () => callQwenOcrText(imageBuffer, mime);
   try {
     return (await primary()).trim();
   } catch {

@@ -124,12 +124,13 @@ describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', 
   beforeEach(() => { mockGenerateContent.mockReset(); mockGroqCreate.mockReset(); });
   afterEach(() => { global.fetch = realFetch; });
 
-  test('a real Gemini failure, with pdf-parse text too thin, falls back to Qwen OCR (via PDF rasterization) + Groq structuring, which succeeds', async () => {
+  test('a real Gemini failure, with pdf-parse text too thin, falls back to Tesseract OCR (real, via PDF rasterization) + Groq structuring, which succeeds', async () => {
+    // Tesseract is PRIMARY OCR for every script (changed 2026-09-12 after
+    // Qwen's HuggingFace router was found depleted in production) - no
+    // network call needed here at all; Tesseract really reads the
+    // rasterized page's actual heading text ("Worksheet").
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ choices: [{ message: { content: 'Task 1: Solve.\na) 2 + 2 = ___' } }] }),
-    });
+    global.fetch = jest.fn().mockRejectedValue(new Error('should not be reached - Tesseract should succeed first'));
     mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From OCR Text', tasks: [] }) } }] });
 
     const res = await request(app)
@@ -138,10 +139,10 @@ describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', 
 
     expect(res.status).toBe(200);
     expect(res.body.quiz.title).toBe('Structured From OCR Text');
-    expect(global.fetch).toHaveBeenCalledWith('https://router.huggingface.co/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
+    expect(global.fetch).not.toHaveBeenCalled();
     expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
     const groqPromptText = mockGroqCreate.mock.calls[0][0].messages[0].content;
-    expect(groqPromptText).toMatch(/2 \+ 2 = ___/); // the OCR'd text made it into Groq's prompt
+    expect(groqPromptText).toMatch(/Worksheet/); // the real Tesseract-OCR'd heading made it into Groq's prompt
   }, 30000);
 
   test('a real Gemini failure, when pdf-parse already got enough real text, skips Qwen OCR entirely and structures directly via Groq', async () => {

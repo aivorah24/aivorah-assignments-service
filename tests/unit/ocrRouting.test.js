@@ -58,22 +58,33 @@ describe('callOcrText routing', () => {
   const realFetch = global.fetch;
   afterEach(() => { global.fetch = realFetch; });
 
-  test('routes to Qwen (via fetch) for Latin/English content, not Tesseract', async () => {
+  // Tesseract is PRIMARY for every script (English included) as of
+  // 2026-09-12 - changed after live testing found Qwen's HuggingFace
+  // router returning "monthly included credits" depleted in PRODUCTION,
+  // an availability failure on top of the earlier-found Telugu accuracy
+  // problem. Qwen is kept only as an opportunistic secondary.
+  test('uses Tesseract (not Qwen/fetch) for Latin/English content when Tesseract succeeds', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('should not be reached - Tesseract should succeed first'));
+    // TINY_PNG is a real, decodable (if content-less) PNG - Tesseract runs
+    // on it without error, so Qwen is never needed.
+    await expect(callOcrText(TINY_PNG, 'image/png')).resolves.toEqual(expect.any(String));
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('falls back to Qwen (via fetch) when Tesseract itself fails on a given image', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ choices: [{ message: { content: 'Task 1: Solve. a) 2 + 2 = ___' } }] }),
     });
-    const text = await callOcrText(TINY_PNG, 'image/png');
+    // A garbage (non-decodable) buffer makes Tesseract throw via the
+    // format guard, exercising the fallback-to-Qwen path.
+    const text = await callOcrText(Buffer.from('garbage'), 'image/png');
     expect(global.fetch).toHaveBeenCalledWith('https://router.huggingface.co/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
     expect(text).toContain('2 + 2');
   });
 
-  test('a garbage buffer never reaches the network (Qwen) or crashes - fails cleanly', async () => {
-    global.fetch = jest.fn().mockRejectedValue(new Error('should not be reachable for a garbage buffer via Tesseract fallback either'));
-    // Qwen is still attempted first (since detection defaults to 'eng' for
-    // garbage input) and fails via the mocked network error; the secondary
-    // engine (Tesseract) then correctly rejects via the format guard
-    // rather than crashing - callOcrText should surface a clean error.
+  test('a garbage buffer with BOTH engines failing still fails cleanly, not a crash', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('Qwen also down'));
     await expect(callOcrText(Buffer.from('garbage'), 'image/png')).rejects.toThrow();
   });
 });
