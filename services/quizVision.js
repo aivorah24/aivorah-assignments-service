@@ -10,6 +10,37 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 
+// Converts mammoth's docx→HTML output into plain text that preserves
+// table structure explicitly. Added 2026-09-12 after a real teacher's
+// worksheet (see QUIZ_PIPELINE_MIGRATION.md) showed the AI fabricating
+// completely different fraction values than a source table actually
+// contained (e.g. generated "24/36, 45/60..." when the source table had
+// "28/50, 8/24, 30/54..."). Root cause: docx uploads get flattened to a
+// PDF and re-read via vision/OCR, discarding mammoth's already-exact
+// table-cell text and forcing a much less reliable re-guess of numbers
+// from a rendered image. This function recovers that ground truth so it
+// can be handed to the generation step directly instead of being thrown
+// away - table rows are marked explicitly so the model doesn't have to
+// visually infer row/column structure at all, just copy verbatim values.
+function htmlToStructuredText(html) {
+  let text = String(html || '');
+  text = text.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (_, tableHtml) => {
+    const rows = [...tableHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map(rowMatch => {
+      const cells = [...rowMatch[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(cellMatch =>
+        cellMatch[1].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
+      );
+      return cells.join(' | ');
+    });
+    return `\n[TABLE - EXACT VALUES, DO NOT ALTER]\n${rows.join('\n')}\n[/TABLE]\n`;
+  });
+  text = text.replace(/<img[^>]*>/gi, '\n[IMAGE]\n');
+  text = text.replace(/<\/(p|h[1-6]|li|div)>/gi, '\n');
+  text = text.replace(/<[^>]+>/g, '');
+  text = text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"');
+  text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  return text;
+}
+
 const GEMINI_VISION_TIMEOUT_MS = parseInt(process.env.GEMINI_VISION_TIMEOUT_MS || '75000', 10);
 
 function withTimeout(promise, ms, label) {
@@ -222,7 +253,7 @@ function cleanLLMJson(raw) {
 }
 
 // ── Gemini Vision — primary engine (free, excellent accuracy) ────────────────
-async function callGeminiVision(parts, { grade, subject, school } = {}) {
+async function callGeminiVision(parts, { grade, subject, school, structuredText } = {}) {
   if (!genAI) throw new Error('GEMINI_API_KEY not configured');
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
@@ -230,7 +261,18 @@ async function callGeminiVision(parts, { grade, subject, school } = {}) {
     // Gemini defaults to ~1.0 and gives a different "guess" run to run.
     generationConfig: { responseMimeType: 'application/json', temperature: 0 }
   });
-  const prompt = buildQuizVisionPrompt({ grade, subject, school });
+  let prompt = buildQuizVisionPrompt({ grade, subject, school });
+  // Ground-truth supplement for docx-sourced uploads, added 2026-09-12: the
+  // PDF Gemini sees here is a flattened RENDER of the original docx, so any
+  // table/number in it still has to be visually re-read - exactly the step
+  // that was found fabricating wrong fraction values on a real worksheet
+  // (mammoth's own docx→HTML conversion gets these values with zero
+  // ambiguity). Handing that exact text over as an explicit authority
+  // doesn't change what Gemini is asked to produce, it just removes the
+  // need to guess numbers it already has an exact source for.
+  if (structuredText && structuredText.trim().length > 20) {
+    prompt += `\n\nGROUND TRUTH TEXT (extracted with 100% accuracy from the original document, including exact table cell values marked with [TABLE]/[/TABLE]): use these EXACT values for any text/numbers/table cells - do NOT visually re-read or guess a number/word from the image if it's given here, even if the image is hard to read. The image is still your source for layout, diagrams, and anything not covered by this text.\n\n${structuredText.slice(0, 12000)}`;
+  }
   return geminiGenerate(model, [...parts, { text: prompt }]);
 }
 
@@ -533,7 +575,19 @@ async function callOcrText(imageBuffer, mime) {
 // pdf-parse alone can return almost nothing (just section headers). When
 // that happens, rasterize the PDF and use Qwen OCR instead - whichever
 // source produced more real content wins.
-async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school } = {}) {
+async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, structuredText } = {}) {
+  // For a docx-sourced upload, mammoth's own conversion (structuredText)
+  // is strictly more accurate than re-deriving text from the flattened
+  // PDF via pdf-parse or OCR - it has exact table cell values with zero
+  // read-back risk. Use it outright when present and skip straight to
+  // structuring; only fall through to pdf-parse/OCR when it's absent
+  // (non-docx sources: a native PDF upload, or a bare image).
+  if (structuredText && structuredText.trim().length > 20) {
+    const text = structuredText.trim();
+    const raw = await buildQuizFromWorksheetText(text, { grade, subject, school });
+    const retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${text.slice(0, 12000)}`);
+    return { raw, retryFn };
+  }
   const pdfParse = require('pdf-parse');
   let text = '';
   try {
@@ -629,19 +683,23 @@ async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
 // splitting OCR (Qwen's strength) from structuring (Groq's strength)).
 // Powers both the sync /quiz/generate route and the queued
 // /quiz/generate-async job.
-async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
+async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structuredText } = {}) {
   const parts = [geminiPdfPart(pdfBuffer)];
   let raw, retryFn;
   try {
-    raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
+    raw = await withTimeout(callGeminiVision(parts, { grade, subject, school, structuredText }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
-    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt }]);
+    let retryPromptSuffix = '';
+    if (structuredText && structuredText.trim().length > 20) {
+      retryPromptSuffix = `\n\nGROUND TRUTH TEXT (exact - use these values, do not guess from the image):\n${structuredText.slice(0, 12000)}`;
+    }
+    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt + retryPromptSuffix }]);
   } catch (geminiErr) {
     // Only a Gemini API/network failure falls through to the fallback -
     // a malformed-JSON response from Gemini itself must still surface as
     // its own distinct error below (parseQuizResponse, outside this catch),
     // not silently retry through the fallback as if Gemini had never answered.
-    const fallback = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
+    const fallback = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, structuredText });
     raw = fallback.raw;
     retryFn = fallback.retryFn;
   }
@@ -650,6 +708,6 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };

@@ -110,8 +110,8 @@ router.post('/generate-image', upload.single('image'), async (req, res) => {
 router.post('/generate', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No PDF file uploaded' });
-    const { grade, subject, school } = req.body;
-    const quiz = await generateQuizFromPdf(req.file.buffer, { grade, subject, school });
+    const { grade, subject, school, structuredText } = req.body;
+    const quiz = await generateQuizFromPdf(req.file.buffer, { grade, subject, school, structuredText });
     res.json({ quiz });
   } catch (err) {
     if (err.message === 'AI returned invalid JSON') {
@@ -124,12 +124,12 @@ router.post('/generate', upload.single('pdf'), async (req, res) => {
 // ── POST /quiz/generate-async — same as /generate, queued so the browser
 // tab doesn't hold one connection open for the whole AI generation pipeline.
 router.post('/generate-async', express.json({ limit: '10mb' }), async (req, res) => {
-  const { fileBase64, mimeType, filename, grade, subject, school } = req.body || {};
+  const { fileBase64, mimeType, filename, grade, subject, school, structuredText } = req.body || {};
   if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
   try {
     const { jobId } = await publishJob('quiz_generate', {
       fileBase64, mimeType: mimeType || 'application/pdf', filename: filename || 'worksheet.pdf',
-      grade, subject, school,
+      grade, subject, school, structuredText,
     });
     res.json({ jobId });
   } catch (e) {

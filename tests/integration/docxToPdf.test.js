@@ -56,6 +56,25 @@ describe('POST /assignments/docx-to-pdf — real conversion', () => {
     expect(parsed.text).toMatch(/Top left/);
     expect(parsed.text).toMatch(/Bottom right/);
   }, 30000);
+
+  // Root cause found via a real teacher's worksheet (2026-09-12, see
+  // QUIZ_PIPELINE_MIGRATION.md): quiz generation was re-deriving table
+  // numbers from a flattened PDF render via vision/OCR, and fabricated
+  // completely different fraction values than the source table actually
+  // had. structuredText recovers mammoth's exact table-cell text so the
+  // generation step never has to re-guess a number it already has an
+  // exact source for.
+  test('also returns structuredText with the table cells preserved exactly, marked as a table block', async () => {
+    const res = await request(app).post('/assignments/docx-to-pdf').send({
+      fileBase64: fixtureBase64('tables.docx'),
+    });
+
+    expect(res.status).toBe(200);
+    expect(typeof res.body.structuredText).toBe('string');
+    expect(res.body.structuredText).toMatch(/\[TABLE/);
+    expect(res.body.structuredText).toMatch(/Top left \| Top right/);
+    expect(res.body.structuredText).toMatch(/Bottom left \| Bottom right/);
+  }, 30000);
 });
 
 describe('POST /assignments/docx-to-pdf — real failure handling', () => {

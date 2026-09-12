@@ -78,10 +78,21 @@ const MCQ_LETTER_TO_INDEX = { A: 0, B: 1, C: 2, D: 3 };
 
 // ── docx-to-pdf conversion (mammoth → HTML → puppeteer → PDF) ──────────────
 // Ported from ai-mentor/server/routes/quiz.js (2026-09-11, B05).
+// 2026-09-12: also returns structuredText (mammoth's HTML converted to
+// plain text with table cells preserved exactly - see htmlToStructuredText
+// in quizVision.js) alongside the PDF. Root cause found via a real
+// teacher's worksheet: quiz generation was flattening docx tables to a
+// PDF and re-reading numbers via vision/OCR, which fabricated completely
+// different fraction values than the source table actually had. mammoth
+// already extracts exact cell text losslessly - discarding that and
+// re-guessing from a rendered image was the bug. structuredText lets the
+// generation step use mammoth's ground truth instead.
 async function docxToPdf(buffer) {
   const mammoth = require('mammoth');
   const puppeteer = require('puppeteer');
+  const { htmlToStructuredText } = require('../services/quizVision');
   const { value: bodyHtml } = await mammoth.convertToHtml({ buffer });
+  const structuredText = htmlToStructuredText(bodyHtml);
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     @page { size: A4; margin: 16mm; }
     body { font-family: 'Times New Roman', Georgia, serif; font-size: 13pt; color:#000; line-height:1.55; }
@@ -103,7 +114,7 @@ async function docxToPdf(buffer) {
     // though nothing is actually broken - just needs more time.
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: 90000 });
     const pdf = await page.pdf({ format: 'A4', printBackground: true });
-    return Buffer.from(pdf);
+    return { pdfBuf: Buffer.from(pdf), structuredText };
   } finally {
     await browser.close();
   }
@@ -1804,8 +1815,8 @@ router.post('/docx-to-pdf', async (req, res) => {
     const { fileBase64 } = req.body;
     if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
     const buffer = Buffer.from(fileBase64, 'base64');
-    const pdfBuf = await docxToPdf(buffer);
-    res.json({ pdfBase64: pdfBuf.toString('base64') });
+    const { pdfBuf, structuredText } = await docxToPdf(buffer);
+    res.json({ pdfBase64: pdfBuf.toString('base64'), structuredText });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

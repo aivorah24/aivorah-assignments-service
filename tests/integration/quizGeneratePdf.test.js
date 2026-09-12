@@ -165,6 +165,61 @@ describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', 
   }, 30000);
 });
 
+describe('POST /quiz/generate — structuredText ground truth (docx table-hallucination fix)', () => {
+  // Reproduces a real bug from a manual-tester report (2026-09-12): a
+  // teacher's docx worksheet's fraction-reduction table (source values
+  // 28/50, 8/24, 30/54...) was regenerated with completely different,
+  // fabricated fractions (24/36, 45/60, 81/108...) - proven by comparing
+  // screenshots of the generated quiz against the source document. Root
+  // cause: docx uploads are flattened to a PDF and re-read via vision/OCR,
+  // discarding mammoth's already-exact table-cell text. structuredText
+  // (produced by POST /assignments/docx-to-pdf, see docxToPdf.test.js)
+  // recovers that ground truth; this test proves the real, un-mocked Groq
+  // structuring step uses those exact values instead of inventing new ones.
+  let app;
+  beforeAll(() => { app = require('../../index'); });
+  beforeEach(() => mockGenerateContent.mockReset());
+
+  test('a real Groq call given structuredText from a fraction table returns the EXACT source fractions, not fabricated ones', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    // groq-sdk is mocked at module scope in this file - proxy the mock
+    // through to the REAL SDK/API for this one test, since the whole
+    // point here is proving real Groq output matches the source exactly,
+    // not a canned mock response.
+    const dotenv = jest.requireActual('dotenv');
+    const { parsed } = dotenv.config();
+    const RealGroq = jest.requireActual('groq-sdk');
+    const realGroqClient = new RealGroq({ apiKey: (parsed && parsed.GROQ_API_KEY) || process.env.GROQ_API_KEY });
+    mockGroqCreate.mockImplementation((...args) => realGroqClient.chat.completions.create(...args));
+
+    const structuredText = `Task 2: Reduce the fractions to their lowest terms.
+[TABLE - EXACT VALUES, DO NOT ALTER]
+1) 28/50 | 5) 32/48
+2) 8/24 | 6) 36/54
+3) 30/54 | 7) 14/56
+4) 18/42 | 8) 18/28
+[/TABLE]`;
+
+    const res = await request(app)
+      .post('/quiz/generate')
+      .field('grade', 'Grade 4')
+      .field('subject', 'Mathematics')
+      .field('structuredText', structuredText)
+      .attach('pdf', Buffer.from('%PDF-fake'), { filename: 'worksheet.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBe(200);
+    const allQuestionText = JSON.stringify(res.body.quiz.tasks);
+    // The exact source fractions must appear...
+    for (const frac of ['28/50', '8/24', '30/54', '18/42', '32/48', '36/54', '14/56', '18/28']) {
+      expect(allQuestionText).toContain(frac);
+    }
+    // ...and none of the fabricated ones seen in the real bug report.
+    for (const frac of ['24/36', '45/60', '81/108']) {
+      expect(allQuestionText).not.toContain(frac);
+    }
+  }, 30000);
+});
+
 describe('POST /quiz/generate-async — validation and queuing', () => {
   let app;
   beforeAll(() => { app = require('../../index'); });

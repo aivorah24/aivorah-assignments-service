@@ -19,7 +19,7 @@ registerHandler('worksheet_extract', async (payload) => {
 registerHandler('quiz_generate', async (payload) => {
   const { generateQuizFromPdf } = require('./quizVision');
   const buffer = Buffer.from(payload.fileBase64, 'base64');
-  const quiz = await generateQuizFromPdf(buffer, { grade: payload.grade, subject: payload.subject, school: payload.school });
+  const quiz = await generateQuizFromPdf(buffer, { grade: payload.grade, subject: payload.subject, school: payload.school, structuredText: payload.structuredText });
   return { quiz };
 });
 
