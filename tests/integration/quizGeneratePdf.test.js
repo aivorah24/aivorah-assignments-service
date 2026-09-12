@@ -83,10 +83,11 @@ describe('POST /quiz/generate — real failure handling', () => {
     const res = await request(app).post('/quiz/generate').attach('pdf', Buffer.from('%PDF'), { filename: 'w.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(500);
     expect(mockGenerateContent).toHaveBeenCalledTimes(1); // fast-fail, no retries
-    // Buffer.from('%PDF') isn't a real PDF, so the Groq-text fallback's own
-    // pdf-parse step fails too - proving the fallback chain runs (not just
-    // that Gemini failed) without needing a real PDF fixture in this suite.
-    expect(res.body.error).toMatch(/Invalid PDF structure/);
+    // Buffer.from('%PDF') isn't a real PDF, so the fallback's own pdf-parse
+    // AND rasterization+OCR steps both fail too - proving the full fallback
+    // chain runs (not just that Gemini failed) without needing a real PDF
+    // fixture in this suite.
+    expect(res.body.error).toMatch(/Could not extract any worksheet content/);
   });
 
   test('a malformed (non-JSON) Gemini response surfaces as a 500 with the raw text', async () => {
@@ -100,49 +101,67 @@ describe('POST /quiz/generate — real failure handling', () => {
 describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', () => {
   // Root cause found via live testing 2026-09-12: some real worksheets
   // (e.g. this Telugu IB PYP fixture) have their actual question content
-  // as non-text graphics, so pdf-parse extracts almost nothing and the
-  // Groq-text tier alone produces empty "questions". Fix: rasterize the
-  // PDF to an image and try Qwen VISION first (same capability Gemini
-  // has); only fall further to Groq text if rasterization/Qwen also fail.
-  // Both tiers use the same real PDF fixture (real Puppeteer rasterization
-  // runs for real - it's fast and proven working) - only the Qwen HTTP
-  // call is mocked, per tier, to make each tier's outcome deterministic.
+  // as non-text graphics, so pdf-parse extracts almost nothing. A second
+  // finding the same day: asking Qwen to do FULL one-shot structured quiz
+  // extraction (title+tasks+questions+answers, the same complex prompt
+  // Gemini handles) is unreliable - it read titles correctly but left
+  // "tasks"/"questions" empty for two different real worksheets. Fixed by
+  // splitting the job: Qwen is used ONLY for OCR (transcribe visible text -
+  // its strength), then Groq's text model (already proven reliable at
+  // following this exact JSON-structuring prompt) builds the quiz from
+  // that transcribed text. Real Puppeteer rasterization runs for real in
+  // both tests below (fast, proven working); only the Qwen OCR HTTP call
+  // is mocked, to make the OCR-quality variable deterministic per tier.
   let app;
   const realPdf = fs.readFileSync(path.join(__dirname, '../fixtures/b02-ib-pyp-worksheet.pdf'));
+  // A PDF whose real embedded text is under the 300-char OCR-trigger
+  // threshold (just a heading) - used specifically to exercise the Qwen
+  // OCR tier, since b02-ib-pyp-worksheet.pdf's real text is already long
+  // enough (~1169 chars of instruction headers) to skip OCR on its own.
+  const thinTextPdf = fs.readFileSync(path.join(__dirname, '../fixtures/thin-text-worksheet.pdf'));
   const realFetch = global.fetch;
   beforeAll(() => { app = require('../../index'); });
   beforeEach(() => { mockGenerateContent.mockReset(); mockGroqCreate.mockReset(); });
   afterEach(() => { global.fetch = realFetch; });
 
-  test('a real Gemini failure falls back to Qwen vision (via PDF rasterization), which succeeds', async () => {
+  test('a real Gemini failure, with pdf-parse text too thin, falls back to Qwen OCR (via PDF rasterization) + Groq structuring, which succeeds', async () => {
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({ choices: [{ message: { content: JSON.stringify({ title: 'Qwen Read This PDF', tasks: [] }) } }] }),
+      json: async () => ({ choices: [{ message: { content: 'Task 1: Solve.\na) 2 + 2 = ___' } }] }),
     });
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From OCR Text', tasks: [] }) } }] });
 
     const res = await request(app)
       .post('/quiz/generate')
-      .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
+      .attach('pdf', thinTextPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
 
     expect(res.status).toBe(200);
-    expect(res.body.quiz.title).toBe('Qwen Read This PDF');
+    expect(res.body.quiz.title).toBe('Structured From OCR Text');
     expect(global.fetch).toHaveBeenCalledWith('https://router.huggingface.co/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
-    expect(mockGroqCreate).not.toHaveBeenCalled();
+    expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
+    const groqPromptText = mockGroqCreate.mock.calls[0][0].messages[0].content;
+    expect(groqPromptText).toMatch(/2 \+ 2 = ___/); // the OCR'd text made it into Groq's prompt
   }, 30000);
 
-  test('Gemini AND Qwen both failing falls back further to Groq text extraction, which succeeds', async () => {
+  test('a real Gemini failure, when pdf-parse already got enough real text, skips Qwen OCR entirely and structures directly via Groq', async () => {
+    // This fixture's real embedded text (pdf-parse) is already >300 chars
+    // (the printed instruction headers), so the >=300-char threshold means
+    // Qwen OCR is never even attempted here - Groq structures straight
+    // from pdf-parse's text. global.fetch is deliberately NOT mocked to
+    // succeed, to prove OCR truly isn't reached in this case.
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
-    global.fetch = jest.fn().mockRejectedValue(new Error('network down'));
-    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Groq Read This From Text', tasks: [] }) } }] });
+    global.fetch = jest.fn().mockRejectedValue(new Error('should not be called'));
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Groq Read This From pdf-parse Text', tasks: [] }) } }] });
 
     const res = await request(app)
       .post('/quiz/generate')
       .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
 
     expect(res.status).toBe(200);
-    expect(res.body.quiz.title).toBe('Groq Read This From Text');
+    expect(res.body.quiz.title).toBe('Groq Read This From pdf-parse Text');
     expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
+    expect(global.fetch).not.toHaveBeenCalled();
   }, 30000);
 });
 

@@ -312,33 +312,62 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
   return parseQuizResponse(raw);
 }
 
-// Text-only fallback for the PDF path, added 2026-09-12: Qwen (HF router)
-// needs an image, not a raw PDF, so it can't cover generateQuizFromPdf
-// directly without page rasterization (a separate, unstarted increment).
-// Instead, extract the PDF's real text (works for any digitally-generated
-// worksheet, including docx->PDF via docx-to-pdf) and hand it to Groq's
-// text model, which IS confirmed working on this account (unlike Groq's
-// vision models, which 404 - see the extract-questions fallback fix).
-// Diagram/layout fidelity is lower than the vision path, but this produces
-// a real, usable quiz instead of a hard failure while Gemini has no funded key.
-async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school } = {}) {
+// Structures already-extracted worksheet TEXT into quiz JSON via Groq's
+// text model - confirmed reliable on this account at following complex
+// structured-JSON instructions (unlike Groq's vision models, which 404,
+// AND unlike Qwen vision, which reads images fine but is unreliable at
+// following this prompt's full JSON-structuring rules in one shot - see
+// the 2026-09-12 finding in QUIZ_PIPELINE_MIGRATION.md). Used for both
+// text extracted directly via pdf-parse and text OCR'd off a rasterized
+// image via callQwenOcrText - either way, structuring is Groq's job.
+async function buildQuizFromWorksheetText(content, { grade, subject, school } = {}) {
   const Groq = require('groq-sdk');
-  const pdfParse = require('pdf-parse');
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  const { text } = await pdfParse(pdfBuffer);
-  const content = (text || '').trim();
-  if (!content) throw new Error('PDF has no extractable text and Gemini/Qwen vision are unavailable');
   const prompt = buildQuizVisionPrompt({ grade, subject, school });
   const completion = await groq.chat.completions.create({
     model: 'openai/gpt-oss-120b',
     temperature: 0,
     messages: [{
       role: 'user',
-      content: `${prompt}\n\nThe worksheet was provided as text (extracted from a PDF), not an image - there is no image to look at. Use ONLY the text below as your source; ignore any instructions above about reading images, diagrams, or visual layout.\n\nWORKSHEET TEXT:\n${content.slice(0, 12000)}`,
+      content: `${prompt}\n\nThe worksheet was provided as text (already transcribed from a PDF or image), not an image - there is no image to look at. Use ONLY the text below as your source; ignore any instructions above about reading images, diagrams, or visual layout.\n\nWORKSHEET TEXT:\n${content.slice(0, 12000)}`,
     }],
     response_format: { type: 'json_object' },
   });
   return completion.choices[0].message.content;
+}
+
+// Qwen used ONLY for OCR (its strength), not full structured extraction
+// (its weakness, per the finding above): transcribe the worksheet's
+// visible text as plainly as possible, then hand that text to Groq (see
+// buildQuizFromWorksheetText) to do the actual quiz-structuring work.
+async function callQwenOcrText(imageBuffer, mime) {
+  return callQwenVisionRaw(imageBuffer, mime,
+    'Transcribe ALL text visible in this worksheet image, exactly as printed, preserving the order top-to-bottom and left-to-right - headings, instructions, every numbered/lettered item, and any text inside diagrams or tables. Do not summarize, translate, explain, or add anything. Output ONLY the raw transcribed text.');
+}
+
+// PDF text-extraction fallback, added 2026-09-12: pdf-parse first (works
+// for any digitally-generated worksheet, including docx->PDF), but many
+// real worksheets (e.g. an IB PYP Telugu fixture) have their actual
+// question content as non-selectable graphics/blank writing lines, so
+// pdf-parse alone can return almost nothing (just section headers). When
+// that happens, rasterize the PDF and use Qwen OCR instead - whichever
+// source produced more real content wins.
+async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school } = {}) {
+  const pdfParse = require('pdf-parse');
+  let text = '';
+  try {
+    const parsed = await pdfParse(pdfBuffer);
+    text = (parsed.text || '').trim();
+  } catch { /* fall through to OCR below */ }
+  if (text.length < 300) {
+    try {
+      const image = await rasterizePdfPagesToImage(pdfBuffer);
+      const ocrText = (await callQwenOcrText(image, 'image/png')).trim();
+      if (ocrText.length > text.length) text = ocrText;
+    } catch { /* keep whatever pdf-parse got, even if thin */ }
+  }
+  if (!text) throw new Error('Could not extract any worksheet content (Gemini failed, and both pdf-parse and Qwen OCR returned nothing)');
+  return buildQuizFromWorksheetText(text, { grade, subject, school });
 }
 
 // PDF page rasterization for the fallback path, added 2026-09-12. Root
@@ -407,10 +436,14 @@ async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
 
 // Increment 8 (PDF path): a PDF (or a docx already converted to PDF
 // upstream via docx-to-pdf) → quiz JSON. Gemini first; on failure (e.g.
-// the currently depleted key), rasterizes the PDF to an image and routes
-// it through Qwen vision (same quality as the image path); if
-// rasterization or Qwen also fails, falls back further to Groq text
-// extraction (lower fidelity - see callGroqTextVisionFallback above).
+// the currently depleted key), falls back to callGroqTextVisionFallback,
+// which itself tries pdf-parse text then Qwen OCR + Groq structuring (see
+// that function's own comments - asking Qwen to do full one-shot
+// structured extraction, tried first here, was found unreliable on
+// 2026-09-12: it followed the JSON schema but left "tasks"/"questions"
+// empty for two different real worksheets while still reading the title
+// correctly - a model-capability limit, not a code bug, worked around by
+// splitting OCR (Qwen's strength) from structuring (Groq's strength)).
 // Powers both the sync /quiz/generate route and the queued
 // /quiz/generate-async job.
 async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
@@ -419,21 +452,16 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
   } catch (geminiErr) {
-    // Only a Gemini API/network failure falls through to the next engine -
+    // Only a Gemini API/network failure falls through to the fallback -
     // a malformed-JSON response from Gemini itself must still surface as
     // its own distinct error below (parseQuizResponse, outside this catch),
-    // not silently retry through Qwen/Groq as if Gemini had never answered.
-    try {
-      const image = await rasterizePdfPagesToImage(pdfBuffer);
-      raw = await callQwenVision(image, 'image/png', { grade, subject, school });
-    } catch (rasterOrQwenErr) {
-      raw = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
-    }
+    // not silently retry through the fallback as if Gemini had never answered.
+    raw = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
   }
   return parseQuizResponse(raw);
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, buildQuizFromWorksheetText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };
