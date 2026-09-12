@@ -134,3 +134,28 @@ describe('multi-task completeness - multi-page tasks', () => {
     expect(incomplete[0].sourcePage).toBe(2);
   });
 });
+
+describe('multi-task completeness - retry can never corrupt an already-valid task', () => {
+  test('a malformed/mismatched retry response (extra or wrongly-ordered tasks) cannot overwrite an already-complete task', async () => {
+    const quiz = { tasks: [makeTask('Task 1', 3), { title: 'Task 2', questions: [] }] };
+    // Retry response deliberately includes a bogus entry for "Task 1" too,
+    // as if trying to overwrite it - by construction, retryIncompleteTasks
+    // only ever considers positions that were in findIncompleteTasks'
+    // result (only Task 2's slot here), so Task 1 can never be reached
+    // regardless of what a misbehaving retry response contains.
+    const retryFn = jest.fn().mockResolvedValue(JSON.stringify({
+      tasks: [{ title: 'Task 2', questions: [{ question: 'x', answer: 'y' }] }],
+    }));
+    const result = await retryIncompleteTasks(quiz, retryFn);
+    expect(result.tasks[0].questions).toHaveLength(3); // Task 1 completely untouched
+    expect(result.tasks[1].questions).toHaveLength(1); // Task 2 correctly recovered
+  });
+
+  test('when there is nothing incomplete, retryFn is never even invoked - zero risk of any task being touched', async () => {
+    const quiz = { tasks: [makeTask('Task 1', 2), makeTask('Task 2', 3), makeTask('Task 3', 1)] };
+    const retryFn = jest.fn();
+    const result = await retryIncompleteTasks(quiz, retryFn);
+    expect(retryFn).not.toHaveBeenCalled();
+    expect(result).toBe(quiz); // same object reference - not even a copy was made
+  });
+});

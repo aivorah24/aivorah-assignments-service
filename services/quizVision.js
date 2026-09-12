@@ -499,6 +499,109 @@ function parseQuizResponse(raw) {
   }
 }
 
+// ── Deterministic visual-grounding enforcement ────────────────────────────
+// Added 2026-09-13 after a live production test caught real hallucination:
+// a text-only fallback (no vision provider available) answered "What
+// colors do you see?" with a confident but WRONG guess ("red, blue,
+// yellow" - the real image also had green) for a question it fundamentally
+// could not see. This happened even though the SAME fallback correctly
+// declined (answer: null) on a diagram-dependent math question in a
+// different worksheet the same day - the model's own judgment about when
+// to decline is not reliable enough on its own, especially for open-ended
+// "describe what you see" phrasing that gives it just enough of a hint to
+// fabricate a plausible-sounding list. Per explicit instruction: this must
+// be enforced at the pipeline/data-validation layer, not by prompt wording
+// alone (prompt wording is what failed here in the first place).
+//
+// Rule, applied only when visualUnderstandingAvailable is false (no vision
+// provider was actually used for this generation):
+//   - A question is "visual-dependent" if it's flagged hasImage/sharedImage,
+//     OR its own text matches a visual-reference pattern ("what do you
+//     see", "look at the picture/diagram/photo", "name this shape/object",
+//     "identify the...", etc.) - covers cases where the model didn't set
+//     the flag but the question itself is unambiguously about an image.
+//   - A visual-dependent question's answer is trusted ONLY if it's
+//     independently grounded in the actual extracted source text (i.e. the
+//     answer's own words/numbers genuinely appear in what was extracted -
+//     e.g. the L-shaped-polygon case, where 6m/8m/3m are printed as real
+//     text labels next to the diagram, not only visible in the graphic).
+//   - Otherwise, the answer/solution are overridden to an explicit,
+//     honest "visual understanding unavailable" state - never left as
+//     the model's ungrounded guess.
+const VISUAL_DEPENDENCY_PATTERN = /what (do|colou?rs?|shapes?|animals?|objects?) (do |can )?you see|look at the (picture|image|diagram|photo|graph|chart|map|figure)|describe the (picture|image|diagram|photo|scene)|name (the|this) (shape|object|animal|picture|figure)|identify the|in the (picture|image|diagram|photo)|based on the (picture|image|diagram|photo|graph|chart)/i;
+
+function isVisuallyDependentQuestion(question, task) {
+  return !!(question.hasImage || task.sharedImage || VISUAL_DEPENDENCY_PATTERN.test(question.question || ''));
+}
+
+// A deliberately simple, deterministic substring-overlap check - NOT an
+// AI call (that would just move the reliability problem, not solve it).
+// "Grounded" means: at least one non-trivial token from the model's
+// answer also appears literally in the extracted source text. This is
+// permissive by design (a false negative here just means a genuinely
+// text-derivable answer gets needlessly hidden, which is the SAFE
+// direction to err in - never the reverse).
+// Checks BOTH the answer and the solution against the source text -
+// checking the answer alone would wrongly reject a legitimately COMPUTED
+// answer (e.g. "28" as the sum of printed side lengths 6+8+3+... is
+// correct math, but "28" itself is never printed anywhere in the source;
+// only its inputs are). A real caught regression during testing: the
+// L-shaped-polygon perimeter case (grounded, correct, printed measurements)
+// was being wrongly nulled until this was fixed to also check the
+// solution text, which restates the actual given numbers used.
+function isAnswerGroundedInSource(answer, solution, sourceText) {
+  if (answer === null || answer === undefined || answer === '') return false;
+  const haystack = String(sourceText || '').toLowerCase();
+  if (!haystack) return false;
+  const answerTokens = String(answer).toLowerCase().match(/[a-z0-9]{2,}/g) || [];
+  if (answerTokens.some(t => haystack.includes(t))) return true;
+  // Numeric tokens (measurements, counts) cited in the solution's working
+  // are the strongest signal of real grounding for a computed answer.
+  const solutionNumbers = String(solution || '').match(/\d+(\.\d+)?/g) || [];
+  return solutionNumbers.length > 0 && solutionNumbers.some(n => haystack.includes(n.toLowerCase()));
+}
+
+const VISUAL_UNAVAILABLE_MESSAGE = 'Visual understanding unavailable — this question requires the worksheet image/diagram, which could not be analyzed without a working vision-capable AI provider.';
+
+function enforceVisualGrounding(quiz, { visualUnderstandingAvailable, sourceText }) {
+  if (visualUnderstandingAvailable) return quiz; // a real vision provider actually looked at the image - trust it
+  for (const task of quiz.tasks || []) {
+    for (const q of task.questions || []) {
+      if (!isVisuallyDependentQuestion(q, task)) continue;
+      if (isAnswerGroundedInSource(q.answer, q.solution, sourceText)) continue; // genuinely derivable from real text, e.g. printed measurements
+      q.answer = null;
+      q.solution = VISUAL_UNAVAILABLE_MESSAGE;
+      q.hint = q.hint || 'Look at the image in the original worksheet to answer this question.';
+      q.visualUnderstandingRequired = true;
+    }
+  }
+  return quiz;
+}
+
+// Unified, deterministic top-level signal for "was there actually enough
+// source content to generate real questions" - added 2026-09-13 after
+// live testing found the SAME real, content-sparse worksheet producing
+// three different structural outcomes across repeated identical runs
+// (valid tasks:[], 4 tasks with 0 questions each, and an outright
+// json_validate_failed API rejection normalized by callGroqWithText
+// above). The exact WORDING/shape of "not enough content" can still vary
+// (that's acceptable LLM variability), but callers must be able to rely
+// on ONE explicit field rather than having to guess from tasks.length,
+// per-task question counts, or the presence of a thrown error.
+function computeExtractionStatus(quiz) {
+  if (quiz.extractionStatus === 'insufficient_source_content') return quiz.extractionStatus; // already set by callGroqWithText's own normalization
+  const tasks = quiz.tasks || [];
+  if (tasks.length === 0) return 'insufficient_source_content';
+  const allTasksEmpty = tasks.every(t => {
+    const hasQuestions = Array.isArray(t.questions) && t.questions.length > 0;
+    const hasAltContent = (t.table && Array.isArray(t.table.rows) && t.table.rows.length) || (Array.isArray(t.tables) && t.tables.length)
+      || (t.chart && Array.isArray(t.chart.bars) && t.chart.bars.length) || (Array.isArray(t.pyramids) && t.pyramids.length)
+      || (Array.isArray(t.diagramFillBlanks) && t.diagramFillBlanks.length);
+    return !hasQuestions && !hasAltContent;
+  });
+  return allTasksEmpty ? 'insufficient_source_content' : 'ok';
+}
+
 // A task is "incomplete" if it has a title but no actual content for a
 // student to answer - no questions, and none of the alternate content
 // shapes the renderer supports (table/tables/chart/pyramids/diagramFill).
@@ -590,7 +693,7 @@ async function retryIncompleteTasks(quiz, retryFn) {
 // verification pass yet — see QUIZ_PIPELINE_MIGRATION.md.
 async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school } = {}) {
   const parts = geminiImageParts([{ buffer: imageBuffer, mime }]);
-  let raw, retryFn, visualUnderstandingAvailable = true;
+  let raw, retryFn, visualUnderstandingAvailable = true, sourceText = '';
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
@@ -612,13 +715,15 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
     // "TEXT-ONLY SUCCESS vs FULL VISUAL UNDERSTANDING" must never be
     // confused for each other).
     visualUnderstandingAvailable = false;
-    const ocrText = await callOcrText(imageBuffer, mime);
-    raw = await buildQuizFromWorksheetText(ocrText, { grade, subject, school });
-    retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${ocrText.slice(0, 12000)}`);
+    sourceText = await callOcrText(imageBuffer, mime);
+    raw = await buildQuizFromWorksheetText(sourceText, { grade, subject, school });
+    retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${sourceText.slice(0, 12000)}`);
   }
   const quiz = parseQuizResponse(raw);
   const result = await retryIncompleteTasks(quiz, retryFn);
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
+  enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
+  result.extractionStatus = computeExtractionStatus(result);
   return result;
 }
 
@@ -641,16 +746,37 @@ async function buildQuizFromWorksheetText(content, { grade, subject, school } = 
 
 // Raw Groq text call, factored out so retryIncompleteTasks can re-prompt
 // the exact same engine with an arbitrary follow-up prompt.
+// A content-sparse worksheet occasionally makes the underlying model write
+// a natural-language refusal ("I can't create an accurate quiz JSON
+// because...") instead of the required JSON object shape, which Groq's
+// own json_object mode then rejects with "json_validate_failed" - live-
+// verified 2026-09-13: the EXACT same real Telugu worksheet input
+// produced, across repeated runs, a valid-but-empty tasks:[] result, a
+// 4-tasks-with-0-questions result, AND this outright API rejection - the
+// same underlying "not enough content" condition surfacing as three
+// structurally different states. Per explicit requirement, blank/
+// insufficient source content must be a DETERMINISTIC STATE, not
+// sometimes a clean result and sometimes a thrown error - this normalizes
+// the json_validate_failed case to the same shape as the other "found the
+// task boundaries but no derivable question content" outcomes, instead of
+// letting it surface as an opaque job failure.
 async function callGroqWithText(promptText) {
   const Groq = require('groq-sdk');
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  const completion = await groq.chat.completions.create({
-    model: 'openai/gpt-oss-120b',
-    temperature: 0,
-    messages: [{ role: 'user', content: promptText }],
-    response_format: { type: 'json_object' },
-  });
-  return completion.choices[0].message.content;
+  try {
+    const completion = await groq.chat.completions.create({
+      model: 'openai/gpt-oss-120b',
+      temperature: 0,
+      messages: [{ role: 'user', content: promptText }],
+      response_format: { type: 'json_object' },
+    });
+    return completion.choices[0].message.content;
+  } catch (err) {
+    if (/json_validate_failed/i.test(String(err.message))) {
+      return JSON.stringify({ title: '', tasks: [], extractionStatus: 'insufficient_source_content' });
+    }
+    throw err;
+  }
 }
 
 // Qwen used ONLY for OCR (its strength), not full structured extraction
@@ -774,7 +900,7 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, s
     const text = structuredText.trim();
     const raw = await buildQuizFromWorksheetText(text, { grade, subject, school });
     const retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${text.slice(0, 12000)}`);
-    return { raw, retryFn };
+    return { raw, retryFn, sourceText: text };
   }
   const pdfParse = require('pdf-parse');
   let text = '';
@@ -805,7 +931,7 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, s
   } catch { /* image preservation is best-effort; text generation must proceed regardless */ }
   const raw = await buildQuizFromWorksheetText(text, { grade, subject, school });
   const retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${text.slice(0, 12000)}`);
-  return { raw, retryFn };
+  return { raw, retryFn, sourceText: text };
 }
 
 // PDF page rasterization for the fallback path, added 2026-09-12. Root
@@ -886,7 +1012,7 @@ async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
 // /quiz/generate-async job.
 async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structuredText } = {}) {
   const parts = [geminiPdfPart(pdfBuffer)];
-  let raw, retryFn, visualUnderstandingAvailable = true;
+  let raw, retryFn, visualUnderstandingAvailable = true, sourceText = '';
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school, structuredText }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
@@ -909,10 +1035,13 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
     const fallback = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, structuredText });
     raw = fallback.raw;
     retryFn = fallback.retryFn;
+    sourceText = fallback.sourceText;
   }
   const quiz = parseQuizResponse(raw);
   const result = await retryIncompleteTasks(quiz, retryFn);
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
+  enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
+  result.extractionStatus = computeExtractionStatus(result);
   return result;
 }
 
@@ -920,4 +1049,6 @@ module.exports = {
   generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText, extractPdfEmbeddedImages, hostExtractedImages,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
   PROVIDER_STATUS, classifyProviderError,
+  enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
+  computeExtractionStatus,
 };
