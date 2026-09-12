@@ -33,6 +33,16 @@ function htmlToStructuredText(html) {
     });
     return `\n[TABLE - EXACT VALUES, DO NOT ALTER]\n${rows.join('\n')}\n[/TABLE]\n`;
   });
+  // Image markers, added 2026-09-12 (Phase 2 - image/diagram preservation):
+  // if the <img> tag's src is a real hosted URL (docxToPdf uploads mammoth's
+  // embedded images to Cloudinary before calling this function - see
+  // hostEmbeddedImages in routes/assignments.js), include it explicitly so
+  // the generation prompt can attach the REAL source image to the nearest
+  // question/task instead of trying to describe or redraw it. A src that's
+  // still a data: URI (upload failed, or this HTML wasn't pre-processed)
+  // falls back to a bare marker - the image's presence is still noted, just
+  // without a usable URL.
+  text = text.replace(/<img[^>]*\bsrc="(https?:\/\/[^"]+)"[^>]*>/gi, (_, url) => `\n[IMAGE: url=${url}]\n`);
   text = text.replace(/<img[^>]*>/gi, '\n[IMAGE]\n');
   text = text.replace(/<\/(p|h[1-6]|li|div)>/gi, '\n');
   text = text.replace(/<[^>]+>/g, '');
@@ -460,7 +470,11 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
 // image via callQwenOcrText - either way, structuring is Groq's job.
 async function buildQuizFromWorksheetText(content, { grade, subject, school } = {}) {
   const prompt = buildQuizVisionPrompt({ grade, subject, school });
-  return callGroqWithText(`${prompt}\n\nThe worksheet was provided as text (already transcribed from a PDF or image), not an image - there is no image to look at. Use ONLY the text below as your source; ignore any instructions above about reading images, diagrams, or visual layout.\n\nWORKSHEET TEXT:\n${content.slice(0, 12000)}`);
+  const imageInstructions = `\n\nIMAGE HANDLING FOR THIS TEXT (overrides the general image instructions above, which assume a picture you can look at - here you cannot): the text below may contain markers like "[IMAGE: url=https://...]" or a bare "[IMAGE]". These mark exactly where a real image/diagram/figure appeared in the source document.
+- For "[IMAGE: url=...]": this is a REAL, already-hosted image of the actual source content. Copy that EXACT url into "imageUrl" on a QUESTION object - NEVER on the task itself, "imageUrl" is only ever read from a question. Put it on the single question the image is most clearly tied to by position (the one immediately after the marker); if it clearly applies to the whole task instead of one specific question, put it on the FIRST question of that task AND set "sharedImage": true on the task (matching the existing shared-image rules above - the renderer looks for the image specifically on questions[0] in that case). Do NOT also write a "diagramDescription"/"sharedImageDescription" guessing what's in the image - the real image will be shown directly, so don't describe or invent its contents.
+- For a bare "[IMAGE]" (no url - the image existed but couldn't be hosted): set "hasImage": true on the nearest question and write a brief, generic "diagramDescription" noting an image was present, without inventing specific visual details you cannot see.
+- Never fabricate an image url that isn't given in the text, and never invent an image marker that isn't there.`;
+  return callGroqWithText(`${prompt}${imageInstructions}\n\nThe worksheet was provided as text (already transcribed from a PDF or image), not an image - there is no image to look at directly (rely on any [IMAGE] markers per the instructions above for image handling instead). Use ONLY the text below as your source for everything else; ignore any OTHER instructions above about reading images, diagrams, or visual layout that assume you can see a picture.\n\nWORKSHEET TEXT:\n${content.slice(0, 12000)}`);
 }
 
 // Raw Groq text call, factored out so retryIncompleteTasks can re-prompt

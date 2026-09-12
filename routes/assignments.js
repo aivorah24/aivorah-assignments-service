@@ -87,12 +87,41 @@ const MCQ_LETTER_TO_INDEX = { A: 0, B: 1, C: 2, D: 3 };
 // already extracts exact cell text losslessly - discarding that and
 // re-guessing from a rendered image was the bug. structuredText lets the
 // generation step use mammoth's ground truth instead.
+// Uploads each embedded image (mammoth's default is a base64 data: URI,
+// verified against mammoth's own source) to Cloudinary and returns a copy
+// of the HTML with real hosted URLs in place of the data: URIs. Added
+// 2026-09-12 (Phase 2 - image/diagram preservation): the original PDF-
+// flattening pipeline had no way to preserve a worksheet's real images at
+// all once discarded into a flattened page render; this recovers them the
+// same "use the exact source, don't re-derive" way structuredText already
+// fixed the fraction-table bug. Failures are per-image and non-fatal - an
+// image that fails to upload just falls through to htmlToStructuredText's
+// bare [IMAGE] marker (presence noted, no URL) rather than failing the
+// whole conversion.
+async function hostEmbeddedImages(html) {
+  const dataUriPattern = /data:image\/[a-zA-Z]+;base64,[^"']+/g;
+  const dataUris = [...new Set(html.match(dataUriPattern) || [])];
+  let result = html;
+  for (const dataUri of dataUris) {
+    try {
+      const uploadResult = await cloudinary.uploader.upload(dataUri, {
+        folder: 'ai_mentor/worksheet_images',
+        public_id: `docx_img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        resource_type: 'image',
+      });
+      result = result.split(dataUri).join(uploadResult.secure_url);
+    } catch { /* leave this one data URI in place - non-fatal per image */ }
+  }
+  return result;
+}
+
 async function docxToPdf(buffer) {
   const mammoth = require('mammoth');
   const puppeteer = require('puppeteer');
   const { htmlToStructuredText } = require('../services/quizVision');
   const { value: bodyHtml } = await mammoth.convertToHtml({ buffer });
-  const structuredText = htmlToStructuredText(bodyHtml);
+  const hostedHtml = await hostEmbeddedImages(bodyHtml);
+  const structuredText = htmlToStructuredText(hostedHtml);
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     @page { size: A4; margin: 16mm; }
     body { font-family: 'Times New Roman', Georgia, serif; font-size: 13pt; color:#000; line-height:1.55; }
@@ -3594,3 +3623,4 @@ ABSOLUTE RULES — violation = wrong output:
 module.exports = router;
 module.exports.normalizeQuizQuestion = normalizeQuizQuestion;
 module.exports.extractWorksheetContent = extractWorksheetContent;
+module.exports.hostEmbeddedImages = hostEmbeddedImages;
