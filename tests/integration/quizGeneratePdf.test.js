@@ -97,16 +97,45 @@ describe('POST /quiz/generate — real failure handling', () => {
   });
 });
 
-describe('POST /quiz/generate — Groq text fallback when Gemini fails (PDF path)', () => {
+describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', () => {
+  // Root cause found via live testing 2026-09-12: some real worksheets
+  // (e.g. this Telugu IB PYP fixture) have their actual question content
+  // as non-text graphics, so pdf-parse extracts almost nothing and the
+  // Groq-text tier alone produces empty "questions". Fix: rasterize the
+  // PDF to an image and try Qwen VISION first (same capability Gemini
+  // has); only fall further to Groq text if rasterization/Qwen also fail.
+  // Both tiers use the same real PDF fixture (real Puppeteer rasterization
+  // runs for real - it's fast and proven working) - only the Qwen HTTP
+  // call is mocked, per tier, to make each tier's outcome deterministic.
   let app;
+  const realPdf = fs.readFileSync(path.join(__dirname, '../fixtures/b02-ib-pyp-worksheet.pdf'));
+  const realFetch = global.fetch;
   beforeAll(() => { app = require('../../index'); });
   beforeEach(() => { mockGenerateContent.mockReset(); mockGroqCreate.mockReset(); });
+  afterEach(() => { global.fetch = realFetch; });
 
-  test('a real Gemini failure on a real PDF falls back to Groq text extraction, which succeeds', async () => {
+  test('a real Gemini failure falls back to Qwen vision (via PDF rasterization), which succeeds', async () => {
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ title: 'Qwen Read This PDF', tasks: [] }) } }] }),
+    });
+
+    const res = await request(app)
+      .post('/quiz/generate')
+      .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.quiz.title).toBe('Qwen Read This PDF');
+    expect(global.fetch).toHaveBeenCalledWith('https://router.huggingface.co/v1/chat/completions', expect.objectContaining({ method: 'POST' }));
+    expect(mockGroqCreate).not.toHaveBeenCalled();
+  }, 30000);
+
+  test('Gemini AND Qwen both failing falls back further to Groq text extraction, which succeeds', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    global.fetch = jest.fn().mockRejectedValue(new Error('network down'));
     mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Groq Read This From Text', tasks: [] }) } }] });
 
-    const realPdf = fs.readFileSync(path.join(__dirname, '../fixtures/b02-ib-pyp-worksheet.pdf'));
     const res = await request(app)
       .post('/quiz/generate')
       .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
@@ -114,7 +143,7 @@ describe('POST /quiz/generate — Groq text fallback when Gemini fails (PDF path
     expect(res.status).toBe(200);
     expect(res.body.quiz.title).toBe('Groq Read This From Text');
     expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
-  });
+  }, 30000);
 });
 
 describe('POST /quiz/generate-async — validation and queuing', () => {

@@ -94,7 +94,14 @@ async function docxToPdf(buffer) {
   const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
   try {
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    // Puppeteer's default navigation timeout is 30s, and mammoth embeds
+    // images as base64 data URIs - which Chromium's network stack still
+    // counts as in-flight requests for networkidle0 purposes. A doc with
+    // several images (e.g. a vocabulary/flashcard worksheet) can
+    // legitimately take longer than 30s to settle, hard-failing the whole
+    // conversion with "Navigation timeout of 30000 ms exceeded" even
+    // though nothing is actually broken - just needs more time.
+    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 90000 });
     const pdf = await page.pdf({ format: 'A4', printBackground: true });
     return Buffer.from(pdf);
   } finally {

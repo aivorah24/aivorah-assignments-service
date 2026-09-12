@@ -341,24 +341,99 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school } 
   return completion.choices[0].message.content;
 }
 
-// Increment 8 (partial — PDF path only, no high-DPI page rasterization yet):
-// a PDF (or a docx already converted to PDF upstream via docx-to-pdf) → quiz
-// JSON. Gemini first; on failure (e.g. the currently depleted key), falls
-// back to Groq text extraction (see callGroqTextVisionFallback above) since
-// Qwen can't take a raw PDF. Powers both the sync /quiz/generate route and
-// the queued /quiz/generate-async job.
+// PDF page rasterization for the fallback path, added 2026-09-12. Root
+// cause found via live testing: many real worksheets (e.g. an IB PYP
+// Telugu worksheet fixture) have their actual question content as
+// non-selectable graphics/blank writing lines - pdf-parse extracts only
+// the printed instruction headers, leaving callGroqTextVisionFallback
+// with nothing to build real questions from (empty "questions": []).
+// Fix: render each PDF page to an image (same technique the frontend
+// already uses in pdfHelpers.ts's pdfToImages - pdfjs-dist + <canvas>,
+// just run inside a Puppeteer page instead of a browser tab, since
+// Puppeteer is already a proven-working dependency on this service), then
+// route through the already-working Qwen vision path - giving the PDF
+// fallback the same visual reading capability Gemini has.
+async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
+  const puppeteer = require('puppeteer');
+  const fs = require('fs');
+  const pdfjsSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.js'), 'utf8');
+  const pdfjsWorkerSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.worker.js'), 'utf8');
+  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.addScriptTag({ content: pdfjsSrc });
+    const base64 = pdfBuffer.toString('base64');
+    const stitchedDataUrl = await page.evaluate(async (b64, maxP, workerSrc) => {
+      // eslint-disable-next-line no-undef
+      const pdfjsLib = window.pdfjsLib;
+      // A real worker (as a blob URL) is required in pdfjs 3.x - it no
+      // longer has a fully-synchronous no-worker fallback.
+      const workerBlob = new Blob([workerSrc], { type: 'application/javascript' });
+      pdfjsLib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(workerBlob);
+      const raw = atob(b64);
+      const data = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) data[i] = raw.charCodeAt(i);
+      const doc = await pdfjsLib.getDocument({ data, disableWorker: true }).promise;
+      const pageCount = Math.min(doc.numPages, maxP);
+      const canvases = [];
+      let totalHeight = 0, maxWidth = 0;
+      for (let i = 1; i <= pageCount; i++) {
+        const pdfPage = await doc.getPage(i);
+        const viewport = pdfPage.getViewport({ scale: 1.5 });
+        const canvas = document.createElement('canvas');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        const ctx = canvas.getContext('2d');
+        await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+        canvases.push(canvas);
+        totalHeight += canvas.height;
+        maxWidth = Math.max(maxWidth, canvas.width);
+      }
+      const combined = document.createElement('canvas');
+      combined.width = maxWidth;
+      combined.height = totalHeight;
+      const combinedCtx = combined.getContext('2d');
+      combinedCtx.fillStyle = '#fff';
+      combinedCtx.fillRect(0, 0, combined.width, combined.height);
+      let y = 0;
+      for (const c of canvases) { combinedCtx.drawImage(c, 0, y); y += c.height; }
+      return combined.toDataURL('image/png');
+    }, base64, maxPages, pdfjsWorkerSrc);
+    return Buffer.from(stitchedDataUrl.split(',')[1], 'base64');
+  } finally {
+    await browser.close();
+  }
+}
+
+// Increment 8 (PDF path): a PDF (or a docx already converted to PDF
+// upstream via docx-to-pdf) → quiz JSON. Gemini first; on failure (e.g.
+// the currently depleted key), rasterizes the PDF to an image and routes
+// it through Qwen vision (same quality as the image path); if
+// rasterization or Qwen also fails, falls back further to Groq text
+// extraction (lower fidelity - see callGroqTextVisionFallback above).
+// Powers both the sync /quiz/generate route and the queued
+// /quiz/generate-async job.
 async function generateQuizFromPdf(pdfBuffer, { grade, subject, school } = {}) {
   const parts = [geminiPdfPart(pdfBuffer)];
   let raw;
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
   } catch (geminiErr) {
-    raw = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
+    // Only a Gemini API/network failure falls through to the next engine -
+    // a malformed-JSON response from Gemini itself must still surface as
+    // its own distinct error below (parseQuizResponse, outside this catch),
+    // not silently retry through Qwen/Groq as if Gemini had never answered.
+    try {
+      const image = await rasterizePdfPagesToImage(pdfBuffer);
+      raw = await callQwenVision(image, 'image/png', { grade, subject, school });
+    } catch (rasterOrQwenErr) {
+      raw = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school });
+    }
   }
   return parseQuizResponse(raw);
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, buildQuizVisionPrompt, cleanLLMJson,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
 };
