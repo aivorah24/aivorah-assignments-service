@@ -10,6 +10,123 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 
+// ── PDF embedded-image extraction — NO AI vision required ────────────────
+// Added 2026-09-12 (Phase 3): a PDF's raster images are stored as regular
+// Image XObjects in its object tree - the exact same asset the page
+// visually shows, extractable directly via pdf-lib's low-level API. This
+// preserves real diagrams/photos in a PDF worksheet even with ZERO vision
+// model available (verified live: Gemini unfunded, Qwen quota-depleted,
+// Mistral rate-limited) - AI vision is only needed to UNDERSTAND/ASSOCIATE
+// a diagram with a specific question, not to physically preserve the
+// image asset itself. Verified against a real Puppeteer-generated PDF:
+// correctly found the embedded Image XObject, its exact dict metadata
+// (Width/Height/ColorSpace/BitsPerComponent/Filter), and reconstructed
+// valid pixel data via zlib inflation (FlateDecode) or direct passthrough
+// (DCTDecode is already a valid JPEG file, no reconstruction needed).
+// Filters this doesn't handle (JPXDecode/JBIG2/CCITTFax - rare in
+// consumer-tool-generated PDFs) are skipped per-image, non-fatally.
+async function extractPdfEmbeddedImages(pdfBuffer, { minDimension = 40 } = {}) {
+  const { PDFDocument, PDFName } = require('pdf-lib');
+  const zlib = require('zlib');
+  const images = [];
+  let pdfDoc;
+  try {
+    pdfDoc = await PDFDocument.load(pdfBuffer, { ignoreEncryption: true });
+  } catch {
+    return images; // not a valid/parseable PDF - nothing to extract, non-fatal
+  }
+  const pages = pdfDoc.getPages();
+  for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+    let xobjects;
+    try {
+      const resources = pages[pageIndex].node.Resources();
+      const xobjectsRef = resources && resources.get(PDFName.of('XObject'));
+      if (!xobjectsRef) continue;
+      xobjects = pdfDoc.context.lookup(xobjectsRef);
+    } catch { continue; }
+    for (const key of xobjects.keys()) {
+      try {
+        const stream = pdfDoc.context.lookup(xobjects.get(key));
+        const dict = stream.dict;
+        if (dict.get(PDFName.of('Subtype'))?.toString() !== '/Image') continue;
+        const width = dict.get(PDFName.of('Width'))?.asNumber?.() ?? 0;
+        const height = dict.get(PDFName.of('Height'))?.asNumber?.() ?? 0;
+        if (width < minDimension || height < minDimension) continue; // skip tiny decorative/icon-sized images
+        const filterEntry = dict.get(PDFName.of('Filter'));
+        const filter = filterEntry ? filterEntry.toString() : '';
+        const raw = Buffer.from(stream.contents);
+
+        if (filter.includes('DCTDecode')) {
+          // Already a complete, valid JPEG byte stream - no reconstruction needed.
+          images.push({ buffer: raw, mime: 'image/jpeg', width, height, page: pageIndex + 1 });
+          continue;
+        }
+        if (filter.includes('FlateDecode') || !filter) {
+          const bpc = dict.get(PDFName.of('BitsPerComponent'))?.asNumber?.() ?? 8;
+          if (bpc !== 8) continue; // only the common 8-bit-per-channel case is handled
+          const csEntry = dict.get(PDFName.of('ColorSpace'));
+          const csStr = csEntry ? csEntry.toString() : '';
+          // DeviceGray=1 component, DeviceRGB or an ICCBased profile (near-
+          // universally 3-component RGB in real-world tool output)=3,
+          // DeviceCMYK=4. Anything else is skipped rather than guessed.
+          const components = csStr.includes('Gray') ? 1 : csStr.includes('CMYK') ? 4 : 3;
+          let pixels;
+          try {
+            pixels = filter.includes('FlateDecode') ? zlib.inflateSync(raw) : raw;
+          } catch { continue; }
+          if (pixels.length < width * height * components) continue; // corrupt/truncated - skip, don't guess
+          const { Jimp } = require('jimp');
+          const img = new Jimp({ width, height, color: 0x000000ff });
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const srcOffset = (y * width + x) * components;
+              const r = pixels[srcOffset];
+              const g = components >= 3 ? pixels[srcOffset + 1] : r;
+              const b = components >= 3 ? pixels[srcOffset + 2] : r;
+              img.setPixelColor(((r << 24) | (g << 16) | (b << 8) | 0xff) >>> 0, x, y);
+            }
+          }
+          const buffer = await img.getBuffer('image/png');
+          images.push({ buffer, mime: 'image/png', width, height, page: pageIndex + 1 });
+          continue;
+        }
+        // JPXDecode (JPEG2000), CCITTFaxDecode, JBIG2Decode - not reconstructed.
+      } catch { /* one bad image object must not abort the rest of the page/document */ }
+    }
+  }
+  return images;
+}
+
+// Uploads extracted PDF images to Cloudinary, returning the same shape
+// hostEmbeddedImages (routes/assignments.js) uses for docx images - a
+// deliberately shared, simple {url} shape so both paths can feed the same
+// downstream marker/instruction format. Non-fatal per image, same pattern
+// as hostEmbeddedImages: a failed upload just means that image is skipped,
+// not that the whole extraction fails.
+async function hostExtractedImages(images) {
+  const cloudinary = require('cloudinary').v2;
+  if (!cloudinary.config().cloud_name) {
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+    });
+  }
+  const hosted = [];
+  for (const img of images) {
+    try {
+      const dataUri = `data:${img.mime};base64,${img.buffer.toString('base64')}`;
+      const result = await cloudinary.uploader.upload(dataUri, {
+        folder: 'ai_mentor/worksheet_images',
+        public_id: `pdf_img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        resource_type: 'image',
+      });
+      hosted.push({ url: result.secure_url, page: img.page });
+    } catch { /* skip this one image, non-fatal */ }
+  }
+  return hosted;
+}
+
 // Converts mammoth's docx→HTML output into plain text that preserves
 // table structure explicitly. Added 2026-09-12 after a real teacher's
 // worksheet (see QUIZ_PIPELINE_MIGRATION.md) showed the AI fabricating
@@ -262,6 +379,40 @@ function cleanLLMJson(raw) {
   return out;
 }
 
+// ── Provider-availability classification ──────────────────────────────────
+// Added 2026-09-12 (Phase 2): the Qwen quota-depletion outage silently
+// affected ordinary English worksheets for an unknown period before being
+// noticed - it looked like "just another engine failure" in the logs,
+// indistinguishable from a one-off network blip. This classifies a
+// provider error into an explicit status so an outage is DIAGNOSABLE from
+// logs going forward, not just "it failed, moved on." Intentionally
+// simple (pattern-matching known error shapes from Gemini/Qwen/Mistral,
+// not a generic provider-SDK abstraction) - a full provider-registry
+// rearchitecture was judged out of scope for what this actually needs to
+// solve: making the CLASS of failure visible, not building a plugin system.
+const PROVIDER_STATUS = Object.freeze({
+  AVAILABLE: 'AVAILABLE',
+  RATE_LIMITED: 'RATE_LIMITED',
+  QUOTA_EXHAUSTED: 'QUOTA_EXHAUSTED',
+  AUTH_FAILURE: 'AUTH_FAILURE',
+  TEMPORARY_FAILURE: 'TEMPORARY_FAILURE',
+  UNSUPPORTED: 'UNSUPPORTED',
+  DISABLED: 'DISABLED',
+});
+
+function classifyProviderError(providerName, err) {
+  const msg = String((err && err.message) || err || '');
+  let status;
+  if (/not configured/i.test(msg)) status = PROVIDER_STATUS.DISABLED;
+  else if (/depleted|exhausted|quota|monthly included credits/i.test(msg)) status = PROVIDER_STATUS.QUOTA_EXHAUSTED;
+  else if (/rate.?limit|429|too many requests/i.test(msg)) status = PROVIDER_STATUS.RATE_LIMITED;
+  else if (/401|403|unauthorized|invalid.?api.?key|authentication/i.test(msg)) status = PROVIDER_STATUS.AUTH_FAILURE;
+  else if (/503|overloaded|unavailable|ECONNRESET|ETIMEDOUT|timeout/i.test(msg)) status = PROVIDER_STATUS.TEMPORARY_FAILURE;
+  else status = PROVIDER_STATUS.TEMPORARY_FAILURE; // unknown shape - treat as transient, not a hard outage, by default
+  console.log(`[vision-provider] ${providerName}: ${status} - ${msg.slice(0, 200)}`);
+  return status;
+}
+
 // ── Gemini Vision — primary engine (free, excellent accuracy) ────────────────
 async function callGeminiVision(parts, { grade, subject, school, structuredText } = {}) {
   if (!genAI) throw new Error('GEMINI_API_KEY not configured');
@@ -439,25 +590,36 @@ async function retryIncompleteTasks(quiz, retryFn) {
 // verification pass yet — see QUIZ_PIPELINE_MIGRATION.md.
 async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school } = {}) {
   const parts = geminiImageParts([{ buffer: imageBuffer, mime }]);
-  let raw, retryFn;
+  let raw, retryFn, visualUnderstandingAvailable = true;
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
     retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt }]);
   } catch (geminiErr) {
+    classifyProviderError('gemini', geminiErr);
     // Was: one-shot Qwen structuring (Qwen reads the image AND builds the
     // full quiz JSON in a single call). Found unreliable 2026-09-12 - see
     // the finding above - and additionally couldn't handle non-Latin
     // scripts (Qwen hallucinated Telugu text entirely). Now: OCR (script-
     // aware - Tesseract for detected Indic scripts, Qwen for Latin/
     // English) + Groq structuring, the same reliable split already used
-    // for the PDF fallback.
+    // for the PDF fallback. This path has NO vision capability at all -
+    // it can only read text, so any question dependent on understanding
+    // a diagram's visual content cannot be answered here (the model is
+    // instructed to decline rather than fabricate - see
+    // buildQuizVisionPrompt's accuracy rules). visualUnderstandingAvailable
+    // is set to false so callers can distinguish this explicitly (Phase 4:
+    // "TEXT-ONLY SUCCESS vs FULL VISUAL UNDERSTANDING" must never be
+    // confused for each other).
+    visualUnderstandingAvailable = false;
     const ocrText = await callOcrText(imageBuffer, mime);
     raw = await buildQuizFromWorksheetText(ocrText, { grade, subject, school });
     retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${ocrText.slice(0, 12000)}`);
   }
   const quiz = parseQuizResponse(raw);
-  return retryIncompleteTasks(quiz, retryFn);
+  const result = await retryIncompleteTasks(quiz, retryFn);
+  result.visualUnderstandingAvailable = visualUnderstandingAvailable;
+  return result;
 }
 
 // Structures already-extracted worksheet TEXT into quiz JSON via Groq's
@@ -583,8 +745,14 @@ async function callOcrText(imageBuffer, mime) {
   const secondary = () => callQwenOcrText(imageBuffer, mime);
   try {
     return (await primary()).trim();
-  } catch {
-    return (await secondary()).trim();
+  } catch (tesseractErr) {
+    classifyProviderError('tesseract', tesseractErr);
+    try {
+      return (await secondary()).trim();
+    } catch (qwenErr) {
+      classifyProviderError('qwen', qwenErr);
+      throw qwenErr;
+    }
   }
 }
 
@@ -622,6 +790,19 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, s
     } catch { /* keep whatever pdf-parse got, even if thin */ }
   }
   if (!text) throw new Error('Could not extract any worksheet content (Gemini failed, and OCR returned nothing)');
+  // Preserve real embedded images from the PDF itself - no AI vision
+  // needed for this (see extractPdfEmbeddedImages). Best-effort: a
+  // failure here must never block text generation, which is why this is
+  // wrapped separately from the required `text` extraction above.
+  try {
+    const embedded = await extractPdfEmbeddedImages(pdfBuffer);
+    if (embedded.length) {
+      const hosted = await hostExtractedImages(embedded);
+      if (hosted.length) {
+        text += `\n\n[DETECTED IMAGES - real, extracted directly from the source document, not AI-generated]\n${hosted.map(h => `[IMAGE: url=${h.url}]`).join('\n')}`;
+      }
+    }
+  } catch { /* image preservation is best-effort; text generation must proceed regardless */ }
   const raw = await buildQuizFromWorksheetText(text, { grade, subject, school });
   const retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${text.slice(0, 12000)}`);
   return { raw, retryFn };
@@ -705,7 +886,7 @@ async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
 // /quiz/generate-async job.
 async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structuredText } = {}) {
   const parts = [geminiPdfPart(pdfBuffer)];
-  let raw, retryFn;
+  let raw, retryFn, visualUnderstandingAvailable = true;
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school, structuredText }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
     const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
@@ -715,19 +896,28 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
     }
     retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt + retryPromptSuffix }]);
   } catch (geminiErr) {
+    classifyProviderError('gemini', geminiErr);
     // Only a Gemini API/network failure falls through to the fallback -
     // a malformed-JSON response from Gemini itself must still surface as
     // its own distinct error below (parseQuizResponse, outside this catch),
     // not silently retry through the fallback as if Gemini had never answered.
+    // This fallback has no vision capability for anything beyond real
+    // embedded PDF images preserved by extractPdfEmbeddedImages (asset
+    // preservation, not understanding) - see generateQuizFromImage's
+    // matching comment for why visualUnderstandingAvailable matters.
+    visualUnderstandingAvailable = false;
     const fallback = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, structuredText });
     raw = fallback.raw;
     retryFn = fallback.retryFn;
   }
   const quiz = parseQuizResponse(raw);
-  return retryIncompleteTasks(quiz, retryFn);
+  const result = await retryIncompleteTasks(quiz, retryFn);
+  result.visualUnderstandingAvailable = visualUnderstandingAvailable;
+  return result;
 }
 
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText,
+  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText, extractPdfEmbeddedImages, hostExtractedImages,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
+  PROVIDER_STATUS, classifyProviderError,
 };
