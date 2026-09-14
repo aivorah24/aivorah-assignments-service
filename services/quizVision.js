@@ -578,6 +578,65 @@ function enforceVisualGrounding(quiz, { visualUnderstandingAvailable, sourceText
   return quiz;
 }
 
+// ── Language-agnostic text-content grounding (Task 3: source grounding) ──
+// Added 2026-09-14 after a live determinism run on the real Telugu
+// worksheet surfaced a DIFFERENT fabrication mode than the visual-
+// grounding case above: the source text for a "rewrite these given
+// sentences" task contains ONLY the instruction line (the actual example
+// sentences exist only as blank handwriting lines/graphics, unreadable by
+// text-only extraction) - and the model, given no example content to
+// reference, invented entirely new Telugu sentences wholesale rather than
+// declining. enforceVisualGrounding did NOT catch this: the question
+// isn't flagged hasImage/sharedImage, and VISUAL_DEPENDENCY_PATTERN is
+// English-only phrasing, so it silently misses non-English worksheets -
+// exactly the "do not create a Telugu-only special case, but Telugu/
+// Indic text needs particular attention" requirement. This check is
+// fully language-agnostic (Unicode-property tokenization, not keyword
+// matching): if NONE of a task's question content (beyond its own title's
+// vocabulary) appears anywhere in the real extracted source text, the
+// content is likely invented rather than derived. Deliberately NON-
+// destructive (unlike enforceVisualGrounding's null-and-decline) - fully
+// suppressing fabricated-but-plausible practice content would make many
+// legitimate worksheets unusable, since some pedagogically-valid
+// generation (e.g. new practice problems following a given pattern) can
+// legitimately share no literal tokens with the source. Instead it
+// surfaces an explicit, honest flag for teacher review before publishing,
+// satisfying "if source content is blank, do not invent educational
+// content [silently]" without being destructively aggressive.
+function extractContentTokens(text) {
+  // \p{M} (combining marks) is required alongside \p{L} for scripts like
+  // Telugu/Devanagari, where vowel signs and virama are separate
+  // combining-mark codepoints, not letters - without it, words split into
+  // meaningless fragments at every combining-mark boundary (caught live
+  // while writing this: "మారము" split into "రమ" instead of staying whole).
+  return String(text || '').match(/[\p{L}\p{M}\p{N}]{2,}/gu) || [];
+}
+
+const CONTENT_GROUNDING_NOTE = 'The specific examples in this task could not be verified against the extracted worksheet text and may not match the original source exactly — please review before publishing.';
+
+function flagUngroundedTaskContent(quiz, { visualUnderstandingAvailable, sourceText }) {
+  if (visualUnderstandingAvailable) return quiz; // a real vision provider saw the actual page - trust it
+  const haystack = String(sourceText || '');
+  if (!haystack) return quiz;
+  for (const task of quiz.tasks || []) {
+    const titleTokens = new Set(extractContentTokens(task.title));
+    const questionTokens = [];
+    for (const q of task.questions || []) {
+      if (q.visualUnderstandingRequired) continue; // already handled by enforceVisualGrounding above
+      for (const tok of extractContentTokens(q.question)) {
+        if (!titleTokens.has(tok)) questionTokens.push(tok);
+      }
+    }
+    if (questionTokens.length === 0) continue;
+    const grounded = questionTokens.some(tok => haystack.includes(tok));
+    if (!grounded) {
+      task.contentGroundingUncertain = true;
+      task.contentGroundingNote = CONTENT_GROUNDING_NOTE;
+    }
+  }
+  return quiz;
+}
+
 // Unified, deterministic top-level signal for "was there actually enough
 // source content to generate real questions" - added 2026-09-13 after
 // live testing found the SAME real, content-sparse worksheet producing
@@ -757,6 +816,7 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
   const result = normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn));
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
+  flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
   return result;
 }
@@ -1075,6 +1135,7 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
   const result = normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn));
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
+  flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
   return result;
 }
@@ -1084,5 +1145,5 @@ module.exports = {
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
   PROVIDER_STATUS, classifyProviderError,
   enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
-  computeExtractionStatus, normalizeQuestionFields,
+  computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
 };
