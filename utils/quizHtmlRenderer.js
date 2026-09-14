@@ -374,9 +374,16 @@ function normalizeRiddleTables(quiz) {
     if (shortTextAnswers < qs.length) continue; // every row must be a short pick-the-word answer
 
     task.table = {
+      // Number sequentially (1, 2, 3...), NOT q.id - id is an internal
+      // layout/image-matching identifier (the prompt assigns "a","b","c"
+      // for that purpose, see buildQuizVisionPrompt), not the worksheet's
+      // visible numbering. A riddle set detected here is inherently a
+      // straight numbered list in the source, so its position IS its
+      // correct displayed number - using q.id silently turned a source
+      // "1, 2, 3..." list into "a, b, c..." for every worksheet like this.
       headers: ['No.', 'Riddle', 'Answer'],
       rows: qs.map((q, i) => [
-        { text: q.id || String(i + 1) },
+        { text: String(i + 1) },
         { text: (q.question || '').replace(/\*\*(.+?)\*\*/g, '$1') },
         { input: true, answer: q.answer, _qtype: 'text' },
       ]),
@@ -515,10 +522,29 @@ function normalizeCharts(quiz) {
   }
 }
 
-// Convert **bold** markdown to <strong> tags.
+// Escape HTML, then convert **bold** markdown to <strong> tags.
+// Uploaded document text (worksheet questions, passages, examples, etc.)
+// is untrusted input that flows directly into this template - added
+// 2026-09-14 after an architecture review flagged that fmt() previously
+// interpolated raw text with zero escaping, so a document containing
+// "<script>" or an "onerror=" attribute in its text would execute as real
+// HTML/JS in the generated worksheet. Escaping happens BEFORE the bold
+// conversion so a literal "**" in source text still becomes <strong>,
+// while any HTML-meaningful characters in the surrounding text are inert.
+// Only &/</> are escaped, not quotes - fmt()'s output is only ever used as
+// element TEXT CONTENT in this file (never interpolated inside an HTML
+// attribute value), so quotes carry no injection risk here and escaping
+// them would visibly mangle ordinary apostrophes ("town's") into &#39; in
+// the rendered worksheet for no safety benefit.
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 function fmt(text) {
   if (!text) return '';
-  return String(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 }
 
 function renderQuizHTML(quiz, branding = {}) {
@@ -1240,7 +1266,12 @@ function renderQuizHTML(quiz, branding = {}) {
     // exact worksheets this styling was originally built for. The BADGE
     // TEXT still uses task.tier's original casing below, unchanged.
     const s = tierStyles[(task.tier || '').toUpperCase()] || tierStyles['DEFAULT'];
-    const taskTitle = (task.title || '').replace(/^(Task\s*\d+)\s*[:\.]\s*/i, '$1 &middot; ').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // escapeHtml BEFORE the "Task N:" -> "Task N &middot;" replacement, since
+    // that replacement itself injects a real HTML entity that must not be
+    // re-escaped - found via a test asserting task.title (untrusted document
+    // content) can't inject a <script> tag, which this line bypassed by not
+    // going through fmt() at all.
+    const taskTitle = escapeHtml(task.title || '').replace(/^(Task\s*\d+)\s*[:\.]\s*/i, '$1 &middot; ').replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     const layout = task.layout || { type: 'single-column', columns: 1 };
     const questions = task.questions || [];
 
@@ -1715,7 +1746,16 @@ function renderQuizHTML(quiz, branding = {}) {
       <h3 style="font-size:14px;color:#93B0AC;margin-bottom:8px;font-weight:700;">&#127919; Success Criteria</h3>
       <ul style="margin:0;padding-left:20px;">${quiz.successCriteria.map(c => `<li style="font-size:14px;color:#A8B5B3;margin:4px 0;">${fmt(c)}</li>`).join('')}</ul>
     </div>` : ''}
+    ${quiz.wordBank?.length ? `<div style="background:rgba(197,165,106,0.08);border:1px solid rgba(197,165,106,0.25);border-radius:10px;padding:16px 20px;margin:16px 0;">
+      <h3 style="font-size:14px;color:#D8C79A;margin-bottom:10px;font-weight:700;">&#128218; Word Bank</h3>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">${quiz.wordBank.map(w => `<span style="background:rgba(197,165,106,0.15);border:1px solid rgba(197,165,106,0.35);border-radius:20px;padding:5px 14px;font-size:13px;color:#D8C79A;font-weight:600;">${fmt(w)}</span>`).join('')}</div>
+    </div>` : ''}
     ${tasksHTML}
+    ${quiz.checklist?.length ? `<div style="background:rgba(147,176,172,0.08);border:1px solid rgba(147,176,172,0.2);border-radius:10px;padding:16px 20px;margin:16px 0;">
+      <h3 style="font-size:14px;color:#93B0AC;margin-bottom:10px;font-weight:700;">&#9989; Learners' Checklist</h3>
+      ${quiz.checklist.map((c, i) => `<label style="display:flex;align-items:flex-start;gap:10px;font-size:14px;color:#A8B5B3;margin:8px 0;cursor:pointer;"><input type="checkbox" id="checklist-${i}" style="margin-top:3px;width:16px;height:16px;flex-shrink:0;"><span>${fmt(c)}</span></label>`).join('')}
+    </div>` : ''}
+    ${quiz.credits ? `<div style="text-align:center;font-size:12px;color:#6b7280;margin:20px 0 0;">${fmt(quiz.credits)}</div>` : ''}
   </div>
 
   <script>

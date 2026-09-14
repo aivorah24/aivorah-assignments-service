@@ -295,6 +295,14 @@ RULES:
 10. For questions that reference a graph/chart/image: READ the visual data from the image to compute the answer. For example, if a bar graph shows football=16, tennis=8 and the Y-axis goes 0,2,4,6... then the scale is 2.
 11. MATCH-THE-FOLLOWING TASKS (e.g. "match the word to the picture", "match the following", "జతపరచండి"): emit ONE question per item to match. Set "type": "mcq" and "options": an array of ALL candidate words/phrases from the matching column (the full pool — the SAME list for every question in that task, in a different order per question), and "answer": the correct word for that item. Do NOT emit matching items as free-text fill-in questions — the student must pick from the pool, not type it.
 12. COUNT THE ANSWER SPACES. If a task provides N blank lines / boxes / spaces for the student to write answers (e.g. 6 blank lines next to a letters table), generate EXACTLY N questions — one per blank line. Count the physical blank lines in the image before writing the questions. Never collapse them into fewer questions.
+13. PRESERVE CONTENT THAT ISN'T A QUESTION (CRITICAL — do not silently drop this). A worksheet is the sole source of truth: extract exactly what is printed, verbatim, in every one of the following fields when present. Never invent content for a field that has nothing in the source — leave it as an empty string/array instead.
+   a) WORD BANK: if the worksheet provides a labeled list of words/terms for students to choose from (e.g. "Word Bank", "Vocabulary", "Word List" — often used across MULTIPLE tasks, not just one), copy EVERY word verbatim, in the same order, into a top-level "wordBank" array. Do not omit any word, and do not add words that aren't printed.
+   b) PASSAGE / CONTEXT TEXT: if a task includes a paragraph, story, or block of body text that the student must read BEFORE answering (not the task's one-line instruction, but real prose content), copy it verbatim into a "passage" field on that task. Preserve it EXACTLY as printed, including any words that are intentionally wrong/misused as part of the exercise (e.g. an "identify the errors" activity) — do NOT correct, paraphrase, or summarize it.
+   c) WORKED EXAMPLE: if a task shows a worked example or model answer before the student's own response area (e.g. "Example: ..."), copy it verbatim into an "example" field on that task.
+   d) LOOKUP / CORRECTION TABLES: if the worksheet has an actual 2+ column table where one column is a fixed value and another is left blank for the student to fill in (e.g. "Incorrect Word | Correct Word"), represent it as a "table" object on the task: { "headers": ["Incorrect Word", "Correct Word"], "rows": [ [ {"text": "buyer"}, {"input": true, "answer": "market"} ], ... ] }. Do NOT split each row into a separate free-standing question — the table IS the structure, keep it as one.
+   e) CHECKLIST: if the document contains a self-assessment/reflection checklist (commonly "I can..." statements, sometimes with checkbox marks), copy every criterion verbatim, in order, into a top-level "checklist" array of strings.
+   f) CREDITS: if the document contains a credits/attribution/author line (e.g. "Credits: ...", a team or author name at the bottom), copy it verbatim into a top-level "credits" string.
+   g) If uncertain whether something qualifies for one of the fields above, prefer including it over dropping it — losing real content is worse than an over-inclusive extraction.
 
 LAYOUT EXTRACTION (CRITICAL — replicate the worksheet's visual layout):
 - Look at how questions are arranged: single column, two columns side-by-side, grid, etc.
@@ -304,7 +312,9 @@ LAYOUT EXTRACTION (CRITICAL — replicate the worksheet's visual layout):
 - "layout.columnGroups": array of column groups, each with "questionIds" listing which questions belong to that column (in order, top to bottom)
 - If a column group has a diagram/image above its questions, set "hasDiagram": true on that group
 - Questions in column 0 are LEFT side, column 1 are RIGHT side
-- CRITICAL ID RULE: Every question in a task MUST have a globally unique "id" (e.g. "a", "b", "c", "d", "e" for the left column, and "f", "g", "h", "i", "j" for the right column). Never reuse the same "id" within a task, even if the worksheet repeats question labels (like two columns both labeled 'a', 'b', 'c').
+- CRITICAL ID RULE: Every question in a task MUST have a globally unique "id" (e.g. "a", "b", "c", "d", "e" for the left column, and "f", "g", "h", "i", "j" for the right column). Never reuse the same "id" within a task, even if the worksheet repeats question labels (like two columns both labeled 'a', 'b', 'c'). This "id" is an INTERNAL identifier only (used for layout/image matching) — it is never shown to the student as a question number, so it does not need to match the worksheet's own numbering style.
+
+METADATA RULE (CRITICAL): "${subject || 'Mathematics'}" and "${grade || 'PYP 4'}" below are only FALLBACK context, used solely when the worksheet itself states nothing. ALWAYS check the worksheet FIRST for its own explicit subject/grade/class text (e.g. "Subject:", "Subject Focus:", "Grade:", "Class:", "PYP:"). If the worksheet states its own subject/grade, YOU MUST use that EXACT text instead of the fallback below, even if it conflicts with the fallback context — the worksheet is authoritative, the fallback is only a guess for when the worksheet is silent on the matter.
 
 Return this EXACT JSON structure:
 {
@@ -314,12 +324,17 @@ Return this EXACT JSON structure:
   "school": "${school || ''}",
   "purpose": "the Purpose/objective line stated on the worksheet, verbatim (empty string if none)",
   "learningOutcomes": ["each Learning Outcome bullet point, exactly as written on the worksheet"],
+  "wordBank": ["each word from a printed Word Bank/Vocabulary List, verbatim, in order — empty array if none"],
+  "checklist": ["each self-assessment/reflection checklist criterion, verbatim — empty array if none"],
+  "credits": "credits/attribution line verbatim, e.g. 'Credits: PYP 4 Team' — empty string if none",
   "concepts": [{ "term": "name", "definition": "short child-friendly definition", "unit": "unit" }],
   "tasks": [
     {
       "tier": "<section label exactly as printed, e.g. 'Must Do' — or '' if none>",
       "title": "Task 1: exact title from worksheet",
       "sourcePage": 1,
+      "passage": "verbatim body/context text the student must read before answering — omit this field entirely if the task has none",
+      "example": "verbatim worked example shown before the student's own response — omit this field entirely if the task has none",
       "layout": {
         "type": "two-column",
         "columns": 2,
@@ -345,6 +360,19 @@ Return this EXACT JSON structure:
         { "id": "a", "type": "numeric", "question": "The length of the book is ___ foot.", "unit": "foot", "answer": 1, "hasImage": false },
         { "id": "b", "type": "numeric", "question": "The length of the bench is ___ feet.", "unit": "feet", "answer": 4, "hasImage": false }
       ]
+    },
+    {
+      "tier": "",
+      "title": "Task 3: Error Detective Alert - Read & Detect Errors (EXAMPLE of a lookup/correction table - use 'table', not one question per row)",
+      "sourcePage": 2,
+      "passage": "the full passage text goes here verbatim, unchanged, even if it contains intentionally wrong words",
+      "table": {
+        "headers": ["Incorrect Word", "Correct Word"],
+        "rows": [
+          [ { "text": "buyer" }, { "input": true, "answer": "market" } ],
+          [ { "text": "consumption" }, { "input": true, "answer": "production" } ]
+        ]
+      }
     }
   ]
 }`;
@@ -739,7 +767,31 @@ function validateQuestionInteraction(q) {
 // with unusual formatting: only fires when the model produced fewer than
 // HALF the structurally-estimated sections, and only when the estimate
 // itself is large enough (>=3) to be a meaningful signal.
-function buildConversionReport(quiz, { sourceSectionEstimate } = {}) {
+// Generic (label-pattern-based, not worksheet-specific) check: the source
+// text names a content block by a common heading, but the corresponding
+// field came back empty - e.g. a document says "Word Bank" somewhere but
+// quiz.wordBank has zero entries. Deliberately only checks for the
+// PRESENCE of a heading pattern, never for exact wording/count, so it
+// stays generic across arbitrary documents rather than tuned to one.
+const NAMED_BLOCK_PATTERNS = {
+  wordBank: { pattern: /\bword\s*bank\b|\bvocabulary\s*(list|bank)\b/i, label: 'Word Bank' },
+  checklist: { pattern: /\blearners?['’]?\s*checklist\b|\bself[\s-]?assessment\b/i, label: 'Learners’ Checklist' },
+  credits: { pattern: /\bcredits?\s*:/i, label: 'Credits' },
+};
+function findMissingNamedBlocks(quiz, sourceText) {
+  const text = String(sourceText || '');
+  if (!text) return [];
+  const missing = [];
+  for (const [field, { pattern, label }] of Object.entries(NAMED_BLOCK_PATTERNS)) {
+    if (!pattern.test(text)) continue;
+    const value = quiz[field];
+    const isEmpty = Array.isArray(value) ? value.length === 0 : !value;
+    if (isEmpty) missing.push(label);
+  }
+  return missing;
+}
+
+function buildConversionReport(quiz, { sourceSectionEstimate, sourceText } = {}) {
   const items = (quiz.tasks || []).map(t => {
     if (!taskHasRealContent(t)) {
       return { title: t.title, status: 'FAILED', reason: 'No content could be extracted or generated for this task from the source document.' };
@@ -762,9 +814,17 @@ function buildConversionReport(quiz, { sourceSectionEstimate } = {}) {
     && items.length < sourceSectionEstimate / 2;
   const overallStatus = items.length === 0 ? 'FAILED'
     : (items.some(i => i.status !== 'PRESERVED') || possibleMissingTasks) ? 'REVIEW_REQUIRED' : 'COMPLETE';
-  const report = { overallStatus, taskCount: items.length, items };
+  const missingNamedBlocks = findMissingNamedBlocks(quiz, sourceText);
+  const report = {
+    overallStatus: missingNamedBlocks.length ? 'REVIEW_REQUIRED' : overallStatus,
+    taskCount: items.length,
+    items,
+  };
   if (possibleMissingTasks) {
     report.taskCountWarning = `Only ${items.length} task(s) were generated, but the source document appears to have roughly ${sourceSectionEstimate} sections - some tasks may be missing entirely. Please compare against the original document before publishing.`;
+  }
+  if (missingNamedBlocks.length) {
+    report.missingContentWarning = `The source document appears to mention ${missingNamedBlocks.join(', ')}, but it wasn't found in the generated worksheet. Please compare against the original document before publishing.`;
   }
   return report;
 }
@@ -792,6 +852,46 @@ function estimateSourceSectionCount(sourceText) {
     return firstLine.length > 0 && firstLine.length <= 100;
   });
   return Math.max(1, headingLikeBlocks.length || blocks.length);
+}
+
+// ── Deterministic explicit-metadata extraction ─────────────────────────
+// Added 2026-09-14 after a real manual-test report: a "Subject Focus:
+// Language" worksheet was generated with "Subject: Mathematics" in the
+// output, because buildQuizVisionPrompt's schema literally tells the
+// model to echo back whatever subject/grade the CALLER passed in (which
+// defaults to 'Mathematics'/'PYP 4' when the frontend doesn't have an
+// explicit value) - the model was never asked to read the worksheet's
+// OWN printed metadata line at all. Per the explicit requirement "never
+// use an LLM guess when explicit source metadata exists", this is a
+// regex-based, non-LLM scan of the extracted source text for common
+// "Label: value" metadata lines - generic label patterns, not tied to
+// any specific worksheet's wording - and OVERRIDES the model's output
+// only when a real match is found. Never invents a value: an absent
+// label leaves the LLM's own (or the caller's default) value untouched.
+const EXPLICIT_METADATA_PATTERNS = {
+  subject: /^\s*subject(?:\s*focus)?\s*[:\-]\s*(.+)$/im,
+  grade: /^\s*(?:grade|class|pyp|year)\s*[:\-]\s*(.+)$/im,
+  purpose: /^\s*purpose\s*[:\-]\s*(.+)$/im,
+  learningOutcome: /^\s*learning\s*outcome[s]?\s*[:\-]\s*(.+)$/im,
+};
+function extractExplicitMetadata(sourceText) {
+  const text = String(sourceText || '');
+  const found = {};
+  for (const [field, pattern] of Object.entries(EXPLICIT_METADATA_PATTERNS)) {
+    const m = text.match(pattern);
+    if (m && m[1] && m[1].trim()) found[field] = m[1].trim();
+  }
+  return found;
+}
+function applyExplicitMetadata(quiz, sourceText) {
+  const explicit = extractExplicitMetadata(sourceText);
+  if (explicit.subject) quiz.subject = explicit.subject;
+  if (explicit.grade) quiz.grade = explicit.grade;
+  if (explicit.purpose && !quiz.purpose) quiz.purpose = explicit.purpose;
+  if (explicit.learningOutcome && !(quiz.learningOutcomes && quiz.learningOutcomes.length)) {
+    quiz.learningOutcomes = [explicit.learningOutcome];
+  }
+  return quiz;
 }
 
 // ── Schema-field normalization ─────────────────────────────────────────
@@ -956,14 +1056,14 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
     raw = await buildQuizFromWorksheetText(sourceText, { grade, subject, school });
     retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${sourceText.slice(0, 12000)}`);
   }
-  const quiz = normalizeQuestionFields(parseQuizResponse(raw));
-  const result = normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn));
+  const quiz = applyExplicitMetadata(normalizeQuestionFields(parseQuizResponse(raw)), sourceText);
+  const result = applyExplicitMetadata(normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn)), sourceText);
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
   const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
-  result.conversionReport = buildConversionReport(result, { sourceSectionEstimate });
+  result.conversionReport = buildConversionReport(result, { sourceSectionEstimate, sourceText });
   result.conversionReport.sourceSectionEstimate = sourceSectionEstimate;
   return result;
 }
@@ -1305,14 +1405,14 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
     retryFn = fallback.retryFn;
     sourceText = fallback.sourceText;
   }
-  const quiz = normalizeQuestionFields(parseQuizResponse(raw));
-  const result = normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn));
+  const quiz = applyExplicitMetadata(normalizeQuestionFields(parseQuizResponse(raw)), sourceText);
+  const result = applyExplicitMetadata(normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn)), sourceText);
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
   const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
-  result.conversionReport = buildConversionReport(result, { sourceSectionEstimate });
+  result.conversionReport = buildConversionReport(result, { sourceSectionEstimate, sourceText });
   result.conversionReport.sourceSectionEstimate = sourceSectionEstimate;
   return result;
 }
@@ -1325,4 +1425,5 @@ module.exports = {
   computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
   buildConversionReport, taskHasRealContent, validateQuestionInteraction, estimateSourceSectionCount,
   GROQ_OUTPUT_TRUNCATED,
+  extractExplicitMetadata, applyExplicitMetadata, findMissingNamedBlocks,
 };
