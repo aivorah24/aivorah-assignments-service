@@ -655,6 +655,38 @@ function computeExtractionStatus(quiz) {
   return allTasksEmpty ? 'insufficient_source_content' : 'ok';
 }
 
+// ── Interaction-shape validation ─────────────────────────────────────────
+// Added 2026-09-14: checks a generated question's shape against what
+// quizHtmlRenderer.js actually requires to render it - read directly from
+// that file's own logic (autoDetectMCQ, the mcq/matching branches), not
+// assumed. A question that LOOKS present (has "question" text, isn't
+// empty) can still be unrenderable - an "mcq" with no options array, a
+// numeric question with no answer and no visual-pending excuse, an
+// image-flagged question with no image reference at all. Generic per
+// question TYPE, not per subject/worksheet - the same checks apply
+// whether the mcq came from a Science true/false task or a Math
+// multiple-choice task.
+function validateQuestionInteraction(q) {
+  const type = q.type || 'text';
+  if (type === 'mcq') {
+    if (!Array.isArray(q.options) || q.options.length < 2) return 'MCQ/matching question has fewer than 2 options.';
+    const hasAnswer = q.answer !== null && q.answer !== undefined && String(q.answer).trim() !== '';
+    const hasCorrectFlag = q.options.some(o => o && typeof o === 'object' && o.correct);
+    if (!hasAnswer && !hasCorrectFlag && !q.visualUnderstandingRequired) return 'MCQ/matching question has no correct answer specified.';
+    return null;
+  }
+  if (type === 'numeric') {
+    if ((q.answer === null || q.answer === undefined || q.answer === '') && !q.visualUnderstandingRequired) {
+      return 'Numeric question has no answer and is not marked as visually-dependent.';
+    }
+    return null;
+  }
+  if (q.hasImage && !q.imageUrl && !q.visualUnderstandingRequired) {
+    return 'Question is flagged hasImage but has neither a real imageUrl nor a visualUnderstandingRequired fallback.';
+  }
+  return null; // text/open-ended questions just need question text, already checked by normalizeQuestionFields
+}
+
 // ── Per-task conversion ledger (zero-silent-content-loss gate) ──────────
 // Added 2026-09-14: findIncompleteTasks/enforceVisualGrounding/
 // flagUngroundedTaskContent each independently detect a different way a
@@ -679,10 +711,39 @@ function buildConversionReport(quiz) {
     if (t.contentGroundingUncertain) {
       return { title: t.title, status: 'REQUIRES_REVIEW', reason: t.contentGroundingNote || CONTENT_GROUNDING_NOTE };
     }
+    const interactionIssue = (t.questions || []).map(validateQuestionInteraction).find(Boolean);
+    if (interactionIssue) {
+      return { title: t.title, status: 'REQUIRES_REVIEW', reason: interactionIssue };
+    }
     return { title: t.title, status: 'PRESERVED' };
   });
   const overallStatus = items.length === 0 ? 'FAILED' : (items.some(i => i.status !== 'PRESERVED') ? 'REVIEW_REQUIRED' : 'COMPLETE');
   return { overallStatus, taskCount: items.length, items };
+}
+
+// ── Deterministic (non-LLM) section-count estimate ────────────────────
+// Added 2026-09-14: a purely structural signal - blank-line-separated
+// blocks whose first line is short (heading-shaped) - counted WITHOUT any
+// keyword/language assumption ("Task", "Activity", numbering style, etc
+// are all deliberately NOT used, since the source can use any convention
+// in any language). This exists so the generated task count isn't only
+// ever cross-checked against the same model that generated it - an
+// independent, if approximate, second opinion. Deliberately advisory,
+// NOT used to force overallStatus: a structural heuristic like this WILL
+// disagree with a correct conversion sometimes (e.g. a worksheet with no
+// blank lines between sections at all), and treating every disagreement
+// as a hard failure would trade one class of false confidence (silent
+// loss) for another (false alarms on correct conversions). Surfaced in
+// the report for human/teacher judgment, not enforced automatically.
+function estimateSourceSectionCount(sourceText) {
+  const text = String(sourceText || '').trim();
+  if (!text) return 0;
+  const blocks = text.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean);
+  const headingLikeBlocks = blocks.filter(b => {
+    const firstLine = b.split('\n')[0].trim();
+    return firstLine.length > 0 && firstLine.length <= 100;
+  });
+  return Math.max(1, headingLikeBlocks.length || blocks.length);
 }
 
 // ── Schema-field normalization ─────────────────────────────────────────
@@ -854,6 +915,7 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
   result.conversionReport = buildConversionReport(result);
+  result.conversionReport.sourceSectionEstimate = estimateSourceSectionCount(sourceText);
   return result;
 }
 
@@ -1174,6 +1236,7 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
   result.conversionReport = buildConversionReport(result);
+  result.conversionReport.sourceSectionEstimate = estimateSourceSectionCount(sourceText);
   return result;
 }
 
@@ -1183,5 +1246,5 @@ module.exports = {
   PROVIDER_STATUS, classifyProviderError,
   enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
   computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
-  buildConversionReport, taskHasRealContent,
+  buildConversionReport, taskHasRealContent, validateQuestionInteraction, estimateSourceSectionCount,
 };
