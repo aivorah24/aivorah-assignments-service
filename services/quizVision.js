@@ -549,14 +549,42 @@ function isVisuallyDependentQuestion(question, task) {
 // L-shaped-polygon perimeter case (grounded, correct, printed measurements)
 // was being wrongly nulled until this was fixed to also check the
 // solution text, which restates the actual given numbers used.
+// Found via a blind unseen-document test (2026-09-14, a Computer Science
+// worksheet never used to develop this code): a diagram literally showing
+// "PC A -- Router -- PC B" was answered "switch" - wrong, but plausible-
+// sounding, because "switch" is a real word from an EARLIER, unrelated
+// section of the same document (a term-matching table) and the original
+// word-token-overlap check accepted ANY match anywhere in the source text
+// as proof of grounding. Common vocabulary re-used across different parts
+// of one document (here, "router"/"switch"/"modem" all appear multiple
+// times for different purposes) makes word-overlap alone unsafe evidence
+// for a visually-dependent question - a specific NUMBER (a measurement,
+// a count) is a much rarer, more reliable coincidence-resistant signal
+// than a common noun. word-token grounding is now used ONLY as a second-
+// tier signal alongside a length floor to reduce trivial-word false
+// positives; numeric grounding (via the solution's own cited numbers,
+// the L-shaped-polygon-perimeter case) remains the strongest signal and
+// is checked first.
 function isAnswerGroundedInSource(answer, solution, sourceText) {
   if (answer === null || answer === undefined || answer === '') return false;
   const haystack = String(sourceText || '').toLowerCase();
   if (!haystack) return false;
-  const answerTokens = String(answer).toLowerCase().match(/[a-z0-9]{2,}/g) || [];
-  if (answerTokens.some(t => haystack.includes(t))) return true;
-  // Numeric tokens (measurements, counts) cited in the solution's working
-  // are the strongest signal of real grounding for a computed answer.
+  // NUMERIC evidence only (a measurement/count actually cited in the
+  // solution's working, e.g. the L-shaped-polygon-perimeter case: 6/8/3
+  // printed near the diagram). Word/phrase matching was tried and
+  // REMOVED after a blind unseen-document test caught it failing: a real
+  // diagram showed "PC A -- Router -- PC B", but the system confidently
+  // answered "switch" - wrong, yet "grounded" by this check, because
+  // "switch" is a real word from an EARLIER, unrelated part of the same
+  // document (a term-matching table). Common vocabulary reused across
+  // different sections of one document makes ANY word/phrase-overlap
+  // check unsafe evidence for a visually-dependent question - a specific
+  // number is a much rarer, more coincidence-resistant signal than a
+  // common noun, so it's the only evidence trusted here. This is
+  // deliberately conservative: some genuinely-answerable text-labeled
+  // visual questions will now be declined that a smarter check might
+  // have allowed - an acceptable tradeoff against confidently answering
+  // wrong, per the explicit "never guess" requirement.
   const solutionNumbers = String(solution || '').match(/\d+(\.\d+)?/g) || [];
   return solutionNumbers.length > 0 && solutionNumbers.some(n => haystack.includes(n.toLowerCase()));
 }

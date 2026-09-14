@@ -44,6 +44,17 @@ describe('isAnswerGroundedInSource', () => {
   test('an answer with no textual basis anywhere (answer or solution) is not grounded', () => {
     expect(isAnswerGroundedInSource('red, blue, yellow', 'The diagram has three colors.', 'Look at the diagram a) What colors do you see?')).toBe(false);
   });
+  test('a word answer that merely happens to appear elsewhere in the document (unrelated section) is NOT grounded - the real bug caught by a blind unseen-document test', () => {
+    // A real Computer Science worksheet's diagram showed "PC A -- Router
+    // -- PC B", but the system answered "switch" (wrong) because "switch"
+    // is a real word from an earlier, unrelated term-matching table in
+    // the same document - word/phrase-overlap grounding was removed
+    // entirely for this exact reason (see isAnswerGroundedInSource's own
+    // comment). Only numeric evidence is trusted now.
+    const sourceText = 'Activity C: Match the Term to its Definition\nRouter | Directs data packets between networks\nSwitch | Connects devices within the same network\nChallenge: Diagram\n6. What device connects PC A and PC B in the diagram above?';
+    expect(isAnswerGroundedInSource('switch', 'The diagram shows a switch linking PC A and PC B, so the answer is switch.', sourceText)).toBe(false);
+  });
+
   test('null/empty answers are never considered grounded', () => {
     expect(isAnswerGroundedInSource(null, 'x', 'anything')).toBe(false);
     expect(isAnswerGroundedInSource('', 'x', 'anything')).toBe(false);
