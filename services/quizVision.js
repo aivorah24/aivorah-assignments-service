@@ -651,14 +651,38 @@ function computeExtractionStatus(quiz) {
   if (quiz.extractionStatus === 'insufficient_source_content') return quiz.extractionStatus; // already set by callGroqWithText's own normalization
   const tasks = quiz.tasks || [];
   if (tasks.length === 0) return 'insufficient_source_content';
-  const allTasksEmpty = tasks.every(t => {
-    const hasQuestions = Array.isArray(t.questions) && t.questions.length > 0;
-    const hasAltContent = (t.table && Array.isArray(t.table.rows) && t.table.rows.length) || (Array.isArray(t.tables) && t.tables.length)
-      || (t.chart && Array.isArray(t.chart.bars) && t.chart.bars.length) || (Array.isArray(t.pyramids) && t.pyramids.length)
-      || (Array.isArray(t.diagramFillBlanks) && t.diagramFillBlanks.length);
-    return !hasQuestions && !hasAltContent;
-  });
+  const allTasksEmpty = tasks.every(t => !taskHasRealContent(t));
   return allTasksEmpty ? 'insufficient_source_content' : 'ok';
+}
+
+// ── Per-task conversion ledger (zero-silent-content-loss gate) ──────────
+// Added 2026-09-14: findIncompleteTasks/enforceVisualGrounding/
+// flagUngroundedTaskContent each independently detect a different way a
+// task can be unusable or uncertain, but none of them gave a caller
+// (teacher UI, publish flow) a single, explicit answer to "was EVERY
+// detected task actually preserved, or did something silently not make
+// it?". This is schema-driven, not tied to any task type/subject - it
+// only asks the same three questions already answered elsewhere in this
+// file (does it have real content, is it visually blocked, is its
+// content unverified against source) and rolls them into one per-task
+// status plus one overall status, so a partial conversion can never be
+// presented as a complete one.
+function buildConversionReport(quiz) {
+  const items = (quiz.tasks || []).map(t => {
+    if (!taskHasRealContent(t)) {
+      return { title: t.title, status: 'FAILED', reason: 'No content could be extracted or generated for this task from the source document.' };
+    }
+    const anyVisualPending = (t.questions || []).some(q => q.visualUnderstandingRequired);
+    if (anyVisualPending) {
+      return { title: t.title, status: 'REQUIRES_REVIEW', reason: 'Contains one or more questions that depend on visual content (diagram/image/chart) which could not be analyzed without a working vision-capable AI provider.' };
+    }
+    if (t.contentGroundingUncertain) {
+      return { title: t.title, status: 'REQUIRES_REVIEW', reason: t.contentGroundingNote || CONTENT_GROUNDING_NOTE };
+    }
+    return { title: t.title, status: 'PRESERVED' };
+  });
+  const overallStatus = items.length === 0 ? 'FAILED' : (items.some(i => i.status !== 'PRESERVED') ? 'REVIEW_REQUIRED' : 'COMPLETE');
+  return { overallStatus, taskCount: items.length, items };
 }
 
 // ── Schema-field normalization ─────────────────────────────────────────
@@ -695,6 +719,24 @@ function normalizeQuestionFields(quiz) {
   return quiz;
 }
 
+// Shared by findIncompleteTasks and computeExtractionStatus (previously
+// duplicated inline in both) - true if a task has ANY real content shape
+// the renderer supports: literal questions, a table, a chart, pyramids,
+// or diagram-fill blanks. Deliberately schema-driven, not task-type-
+// driven - a Science matching task, a Social Studies table activity, and
+// a Math fraction task all satisfy this the same way, through whichever
+// field they actually populated. This is what makes findIncompleteTasks/
+// computeExtractionStatus/buildConversionReport general rather than
+// hardcoded to any one subject or the three example worksheets.
+function taskHasRealContent(t) {
+  const hasQuestions = Array.isArray(t.questions) && t.questions.length > 0;
+  const hasTable = (t.table && Array.isArray(t.table.rows) && t.table.rows.length) || (Array.isArray(t.tables) && t.tables.length);
+  const hasChart = t.chart && Array.isArray(t.chart.bars) && t.chart.bars.length;
+  const hasPyramids = Array.isArray(t.pyramids) && t.pyramids.length;
+  const hasDiagramFill = Array.isArray(t.diagramFillBlanks) && t.diagramFillBlanks.length;
+  return hasQuestions || hasTable || hasChart || hasPyramids || hasDiagramFill;
+}
+
 // A task is "incomplete" if it has a title but no actual content for a
 // student to answer - no questions, and none of the alternate content
 // shapes the renderer supports (table/tables/chart/pyramids/diagramFill).
@@ -707,14 +749,7 @@ function normalizeQuestionFields(quiz) {
 // ANY uploaded document can contain ANY task type/phrasing, patching one
 // task type at a time doesn't scale - this is a general safety net.
 function findIncompleteTasks(quiz) {
-  return (quiz.tasks || []).filter(t => {
-    const hasQuestions = Array.isArray(t.questions) && t.questions.length > 0;
-    const hasTable = (t.table && Array.isArray(t.table.rows) && t.table.rows.length) || (Array.isArray(t.tables) && t.tables.length);
-    const hasChart = t.chart && Array.isArray(t.chart.bars) && t.chart.bars.length;
-    const hasPyramids = Array.isArray(t.pyramids) && t.pyramids.length;
-    const hasDiagramFill = Array.isArray(t.diagramFillBlanks) && t.diagramFillBlanks.length;
-    return !hasQuestions && !hasTable && !hasChart && !hasPyramids && !hasDiagramFill;
-  });
+  return (quiz.tasks || []).filter(t => !taskHasRealContent(t));
 }
 
 // Loose title match: models reliably paraphrase/drop prefixes ("Task 2: "),
@@ -818,6 +853,7 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
+  result.conversionReport = buildConversionReport(result);
   return result;
 }
 
@@ -1137,6 +1173,7 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
+  result.conversionReport = buildConversionReport(result);
   return result;
 }
 
@@ -1146,4 +1183,5 @@ module.exports = {
   PROVIDER_STATUS, classifyProviderError,
   enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
   computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
+  buildConversionReport, taskHasRealContent,
 };
