@@ -130,4 +130,116 @@ describe('POST /assignments', () => {
       key_concept: 'Change',
     }));
   });
+
+  // Regression tests: a student created in a different service's database
+  // (aivorah-students-service, or a legacy monolith account) never gets a
+  // matching row in THIS service's own `users` table, so assignments.student_id's
+  // FK violates on every attempt. ensureLocalStudent() must sync a minimal row
+  // first, but only ever INSERT — never touch an existing one.
+  describe('syncing the student row (FK fix)', () => {
+    test('a student not yet present locally, with studentName provided, gets synced before the assignment insert succeeds', async () => {
+      let usersInsertCalls = [];
+      mockSb.supabase.from.mockImplementation((table) => {
+        if (table === 'assignments') {
+          return {
+            insert: () => ({
+              select: () => ({ single: () => Promise.resolve({
+                data: { id: 'a1', title: 'New Assignment', student_id: STUDENT_UUID, created_by_id: TEACHER_UUID, created_by_role: 'teacher', questions: [] },
+                error: null,
+              }) }),
+            }),
+          };
+        }
+        if (table === 'users') {
+          // Both ensureLocalStudent's existence check and the creator-profile
+          // lookup query by id - neither result is asserted on here, only
+          // whether/what gets inserted, so a single "not found" stub for both
+          // is sufficient.
+          return {
+            select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }),
+            insert: jest.fn((payload) => { usersInsertCalls.push(payload); return Promise.resolve({ data: payload, error: null }); }),
+          };
+        }
+        return { select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }) };
+      });
+
+      const res = await request(app).post('/assignments').send({
+        title: 'New Assignment',
+        dueDate: '2026-09-01',
+        studentId: STUDENT_UUID,
+        studentName: 'Sai Priya',
+        grade: 'Grade 12',
+        curriculum: 'CBSE',
+        createdById: TEACHER_UUID,
+        createdByRole: 'parent',
+      });
+
+      expect(res.status).toBe(200);
+      expect(usersInsertCalls).toHaveLength(1);
+      expect(usersInsertCalls[0]).toEqual(expect.objectContaining({
+        id: STUDENT_UUID, name: 'Sai Priya', role: 'student', grade: 'Grade 12', curriculum: 'CBSE',
+      }));
+    });
+
+    test('a student already present locally is never re-inserted or overwritten', async () => {
+      let usersInsertCalls = [];
+      mockSb.supabase.from.mockImplementation((table) => {
+        if (table === 'assignments') {
+          return {
+            insert: () => ({
+              select: () => ({ single: () => Promise.resolve({
+                data: { id: 'a1', title: 'New Assignment', student_id: STUDENT_UUID, questions: [] },
+                error: null,
+              }) }),
+            }),
+          };
+        }
+        if (table === 'users') {
+          return {
+            select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { id: STUDENT_UUID }, error: null }) }) }),
+            insert: jest.fn((payload) => { usersInsertCalls.push(payload); return Promise.resolve({ data: payload, error: null }); }),
+          };
+        }
+        return { select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: null, error: null }) }) }) };
+      });
+
+      const res = await request(app).post('/assignments').send({
+        title: 'New Assignment',
+        dueDate: '2026-09-01',
+        studentId: STUDENT_UUID,
+        studentName: 'Existing Student',
+        createdById: TEACHER_UUID,
+      });
+
+      expect(res.status).toBe(200);
+      expect(usersInsertCalls).toHaveLength(0);
+    });
+
+    test('no studentName provided (legacy caller) behaves exactly as before - no sync attempted, no crash', async () => {
+      // Self-contained mockImplementation (rather than setTable) since an
+      // earlier test in this describe block replaces `from` wholesale and
+      // reset() only clears setTable's response queue, not that override.
+      mockSb.supabase.from.mockImplementation((table) => {
+        if (table === 'assignments') {
+          return { insert: () => ({
+            select: () => ({ single: () => Promise.resolve({
+              data: null,
+              error: { message: 'insert or update on table "assignments" violates foreign key constraint "assignments_student_id_fkey"' },
+            }) }),
+          }) };
+        }
+        return { select: () => ({ eq: () => ({ maybeSingle: () => Promise.resolve({ data: { id: TEACHER_UUID, name: 'Ms. Rao' }, error: null }) }) }) };
+      });
+
+      const res = await request(app).post('/assignments').send({
+        title: 'New Assignment',
+        dueDate: '2026-09-01',
+        studentId: STUDENT_UUID,
+        createdById: TEACHER_UUID,
+      });
+
+      expect(res.status).toBe(500);
+      expect(res.body.error).toMatch(/foreign key constraint/);
+    });
+  });
 });

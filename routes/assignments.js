@@ -214,6 +214,22 @@ async function resolveUserId(id) {
   return null;
 }
 
+// Students are created in a different service's database (aivorah-students-service
+// or, for legacy accounts, the monolith) - this service's own `users` table (which
+// assignments.student_id foreign-keys against) never gets those rows, so creating
+// an assignment for a real student fails with a FK violation. Only inserts when no
+// local row exists yet - never updates/overwrites one that's already there.
+async function ensureLocalStudent(id, name, grade, curriculum) {
+  if (!id || !name) return;
+  const { data: existing } = await supabase.from('users').select('id').eq('id', id).maybeSingle();
+  if (existing) return;
+  await supabase.from('users').insert({
+    id, name, role: 'student',
+    grade: grade || null, curriculum: curriculum || null,
+    onboarding_complete: true,
+  });
+}
+
 // normaliseWithSubmission merges per-student submission data onto assignment row
 function normaliseWithSubmission(a, sub, branding) {
   const base = normalise(a, branding);
@@ -966,7 +982,7 @@ router.post('/', async (req, res) => {
   try {
     const {
       title, subject = '', chapter = '', dueDate, type = 'assignment', note = '',
-      studentId, createdById, createdByRole = 'teacher',
+      studentId, studentName = null, createdById, createdByRole = 'teacher',
       grade = null, curriculum = null, questions = [], documentUrl = null, documentUrls = [],
       successCriteria = [], taskSteps = [], quizQuestions = [],
       centralIdea = null, linesOfInquiry = [], learnerProfile = null, atlSkill = null, keyConcept = null,
@@ -983,6 +999,7 @@ router.post('/', async (req, res) => {
 
     const userId    = studentId   ? await resolveUserId(studentId)   : null;
     const creatorId = createdById ? await resolveUserId(createdById) : null;
+    if (userId) await ensureLocalStudent(userId, studentName, grade, curriculum);
 
     // ── Curriculum partitioning ────────────────────────────────────────────
     // A class-wide assignment (no specific student) reaches students by matching
