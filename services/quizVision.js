@@ -602,6 +602,40 @@ function computeExtractionStatus(quiz) {
   return allTasksEmpty ? 'insufficient_source_content' : 'ok';
 }
 
+// ── Schema-field normalization ─────────────────────────────────────────
+// Added 2026-09-14 after a live determinism test caught a real, separate
+// correctness gap: the model occasionally writes a question's text under
+// a non-canonical field name ("prompt" instead of "question", sometimes
+// alongside extra unspecified fields like "task_id"/"instruction"). This
+// is NOT caught by findIncompleteTasks (the questions array is non-empty
+// - it just has the wrong key), so it would have reached the renderer as
+// a question with BLANK text shown to the student. Runs first, before
+// any other validation, so everything downstream (completeness checks,
+// visual grounding, retry) sees a consistent shape regardless of which
+// field name the model happened to use on a given run.
+const QUESTION_TEXT_ALIASES = ['prompt', 'text', 'q', 'questionText'];
+function normalizeQuestionFields(quiz) {
+  for (const task of quiz.tasks || []) {
+    if (!Array.isArray(task.questions)) continue;
+    for (const q of task.questions) {
+      if (!q.question || !String(q.question).trim()) {
+        for (const alias of QUESTION_TEXT_ALIASES) {
+          if (q[alias] && String(q[alias]).trim()) {
+            q.question = q[alias];
+            break;
+          }
+        }
+      }
+    }
+    // A question with no recoverable text under any known field name is
+    // worse than no question at all (blank UI shown to the student) -
+    // drop it, which naturally makes findIncompleteTasks re-flag the task
+    // for retry if that was its only content, rather than shipping it.
+    task.questions = task.questions.filter(q => q.question && String(q.question).trim());
+  }
+  return quiz;
+}
+
 // A task is "incomplete" if it has a title but no actual content for a
 // student to answer - no questions, and none of the alternate content
 // shapes the renderer supports (table/tables/chart/pyramids/diagramFill).
@@ -719,8 +753,8 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
     raw = await buildQuizFromWorksheetText(sourceText, { grade, subject, school });
     retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${sourceText.slice(0, 12000)}`);
   }
-  const quiz = parseQuizResponse(raw);
-  const result = await retryIncompleteTasks(quiz, retryFn);
+  const quiz = normalizeQuestionFields(parseQuizResponse(raw));
+  const result = normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn));
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
@@ -1037,8 +1071,8 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
     retryFn = fallback.retryFn;
     sourceText = fallback.sourceText;
   }
-  const quiz = parseQuizResponse(raw);
-  const result = await retryIncompleteTasks(quiz, retryFn);
+  const quiz = normalizeQuestionFields(parseQuizResponse(raw));
+  const result = normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn));
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
@@ -1050,5 +1084,5 @@ module.exports = {
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
   PROVIDER_STATUS, classifyProviderError,
   enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
-  computeExtractionStatus,
+  computeExtractionStatus, normalizeQuestionFields,
 };
