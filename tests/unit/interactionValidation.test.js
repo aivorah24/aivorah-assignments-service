@@ -76,3 +76,44 @@ describe('buildConversionReport - interaction validation integrated', () => {
     expect(report.overallStatus).toBe('COMPLETE');
   });
 });
+
+describe('buildConversionReport - sourceSectionEstimate safety net (whole-task loss, not just thin content)', () => {
+  // Live bug, 2026-09-14: a real 5-task worksheet came back with only 2 task
+  // OBJECTS - not 2 good + 3 FAILED, just 2 total. Every per-task check
+  // passed (nothing wrong with either task that existed), so overallStatus
+  // was wrongly COMPLETE. Root cause was a Groq output-token truncation
+  // (see callGroqWithText), fixed separately - this check is the
+  // independent safety net for any OTHER cause of the same symptom.
+  test('few tasks vs a much larger structural estimate flips overallStatus to REVIEW_REQUIRED with a warning', () => {
+    const quiz = { tasks: [
+      { title: 'Task 1', questions: [{ question: 'x', answer: 'y' }] },
+      { title: 'Task 2', questions: [{ question: 'x', answer: 'y' }] },
+    ] };
+    const report = buildConversionReport(quiz, { sourceSectionEstimate: 5 });
+    expect(report.overallStatus).toBe('REVIEW_REQUIRED');
+    expect(report.taskCountWarning).toMatch(/2 task.*5 sections/);
+  });
+
+  test('task count roughly matching the estimate is NOT flagged (no false alarm)', () => {
+    const quiz = { tasks: [
+      { title: 'Task 1', questions: [{ question: 'x', answer: 'y' }] },
+      { title: 'Task 2', questions: [{ question: 'x', answer: 'y' }] },
+    ] };
+    const report = buildConversionReport(quiz, { sourceSectionEstimate: 2 });
+    expect(report.overallStatus).toBe('COMPLETE');
+    expect(report.taskCountWarning).toBeUndefined();
+  });
+
+  test('a small estimate (<3) never triggers the warning, even with 1 task - avoids noise on short worksheets', () => {
+    const quiz = { tasks: [{ title: 'Task 1', questions: [{ question: 'x', answer: 'y' }] }] };
+    const report = buildConversionReport(quiz, { sourceSectionEstimate: 2 });
+    expect(report.taskCountWarning).toBeUndefined();
+  });
+
+  test('omitting sourceSectionEstimate entirely never triggers the warning (backward compatible)', () => {
+    const quiz = { tasks: [{ title: 'Task 1', questions: [{ question: 'x', answer: 'y' }] }] };
+    const report = buildConversionReport(quiz);
+    expect(report.taskCountWarning).toBeUndefined();
+    expect(report.overallStatus).toBe('COMPLETE');
+  });
+});

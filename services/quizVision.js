@@ -727,7 +727,19 @@ function validateQuestionInteraction(q) {
 // content unverified against source) and rolls them into one per-task
 // status plus one overall status, so a partial conversion can never be
 // presented as a complete one.
-function buildConversionReport(quiz) {
+// sourceSectionEstimate is now an optional SAFETY NET, not just an advisory
+// display number - added 2026-09-14 after a live bug where whole tasks
+// (not just thin content within an existing task) vanished from the output
+// entirely: a 5-task worksheet came back with only 2 task OBJECTS, so
+// every per-task check above passed (there was nothing wrong with either
+// of the 2 tasks that existed) and overallStatus was wrongly COMPLETE.
+// Root cause (see callGroqWithText) is fixed separately, but this check
+// stays as defense-in-depth against ANY other cause of whole-task loss.
+// Deliberately conservative to avoid false alarms on correct conversions
+// with unusual formatting: only fires when the model produced fewer than
+// HALF the structurally-estimated sections, and only when the estimate
+// itself is large enough (>=3) to be a meaningful signal.
+function buildConversionReport(quiz, { sourceSectionEstimate } = {}) {
   const items = (quiz.tasks || []).map(t => {
     if (!taskHasRealContent(t)) {
       return { title: t.title, status: 'FAILED', reason: 'No content could be extracted or generated for this task from the source document.' };
@@ -745,8 +757,16 @@ function buildConversionReport(quiz) {
     }
     return { title: t.title, status: 'PRESERVED' };
   });
-  const overallStatus = items.length === 0 ? 'FAILED' : (items.some(i => i.status !== 'PRESERVED') ? 'REVIEW_REQUIRED' : 'COMPLETE');
-  return { overallStatus, taskCount: items.length, items };
+  const possibleMissingTasks = typeof sourceSectionEstimate === 'number'
+    && sourceSectionEstimate >= 3
+    && items.length < sourceSectionEstimate / 2;
+  const overallStatus = items.length === 0 ? 'FAILED'
+    : (items.some(i => i.status !== 'PRESERVED') || possibleMissingTasks) ? 'REVIEW_REQUIRED' : 'COMPLETE';
+  const report = { overallStatus, taskCount: items.length, items };
+  if (possibleMissingTasks) {
+    report.taskCountWarning = `Only ${items.length} task(s) were generated, but the source document appears to have roughly ${sourceSectionEstimate} sections - some tasks may be missing entirely. Please compare against the original document before publishing.`;
+  }
+  return report;
 }
 
 // ── Deterministic (non-LLM) section-count estimate ────────────────────
@@ -942,8 +962,9 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
-  result.conversionReport = buildConversionReport(result);
-  result.conversionReport.sourceSectionEstimate = estimateSourceSectionCount(sourceText);
+  const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
+  result.conversionReport = buildConversionReport(result, { sourceSectionEstimate });
+  result.conversionReport.sourceSectionEstimate = sourceSectionEstimate;
   return result;
 }
 
@@ -980,16 +1001,43 @@ async function buildQuizFromWorksheetText(content, { grade, subject, school } = 
 // the json_validate_failed case to the same shape as the other "found the
 // task boundaries but no derivable question content" outcomes, instead of
 // letting it surface as an opaque job failure.
-async function callGroqWithText(promptText) {
+// GROQ_OUTPUT_TRUNCATED marks a response cut off mid-JSON by the completion-
+// token budget - thrown rather than returned so callers can't mistake a
+// truncated (silently task-dropping) result for a genuinely complete one.
+const GROQ_OUTPUT_TRUNCATED = 'GROQ_OUTPUT_TRUNCATED';
+
+// Live root-caused 2026-09-14: a real 5-task worksheet (28 questions total)
+// came back with only 2 tasks - not "2 tasks + 3 FAILED", but 2 tasks
+// TOTAL, the other 3 never existing in the JSON at all, so conversionReport
+// (which only inspects tasks that exist) reported "COMPLETE". Direct
+// reproduction against Groq showed finish_reason: "length" - gpt-oss-120b
+// spent 1364 of its 3072 default completion tokens on hidden
+// "reasoning_tokens" (not part of the visible JSON), leaving too little
+// budget for the actual output, which cut off mid-task and silently
+// dropped everything after. Fix verified live: max_tokens: 16000 +
+// reasoning_effort: 'low' dropped reasoning_tokens to 185 and produced all
+// 5 tasks with finish_reason: "stop". Even with headroom raised, a
+// sufficiently large worksheet could still truncate, so finish_reason is
+// checked explicitly rather than trusted to "probably not happen again".
+async function callGroqWithText(promptText, { maxTokens = 16000 } = {}) {
   const Groq = require('groq-sdk');
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   try {
     const completion = await groq.chat.completions.create({
       model: 'openai/gpt-oss-120b',
       temperature: 0,
+      max_tokens: maxTokens,
+      reasoning_effort: 'low',
       messages: [{ role: 'user', content: promptText }],
       response_format: { type: 'json_object' },
     });
+    if (completion.choices[0].finish_reason === 'length') {
+      // One retry at double the budget before giving up - covers worksheets
+      // even larger than the one that surfaced this bug, without doubling
+      // cost on every normal-sized request.
+      if (maxTokens < 32000) return callGroqWithText(promptText, { maxTokens: maxTokens * 2 });
+      throw new Error(GROQ_OUTPUT_TRUNCATED);
+    }
     return completion.choices[0].message.content;
   } catch (err) {
     if (/json_validate_failed/i.test(String(err.message))) {
@@ -1263,8 +1311,9 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
   result.extractionStatus = computeExtractionStatus(result);
-  result.conversionReport = buildConversionReport(result);
-  result.conversionReport.sourceSectionEstimate = estimateSourceSectionCount(sourceText);
+  const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
+  result.conversionReport = buildConversionReport(result, { sourceSectionEstimate });
+  result.conversionReport.sourceSectionEstimate = sourceSectionEstimate;
   return result;
 }
 
@@ -1275,4 +1324,5 @@ module.exports = {
   enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
   computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
   buildConversionReport, taskHasRealContent, validateQuestionInteraction, estimateSourceSectionCount,
+  GROQ_OUTPUT_TRUNCATED,
 };
