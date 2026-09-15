@@ -19,15 +19,20 @@
 // worksheet-specific rule) -> bbox crop + Cloudinary hosting -> grade
 // attached post-hoc (Stage 2) -> existing renderQuizHTML.
 //
-// Model choice: Qwen2.5-VL-72B-Instruct (via the HuggingFace router), not
-// "Qwen3-VL" — this repo has zero prior verified working calls to a
-// Qwen3-VL endpoint/model id, and per the standing "no guessing" rule this
-// POC does not gamble on an unverified model name. Qwen2.5-VL-72B is the
-// same model already used (and live-verified working when HF_TOKEN is
-// valid) by quizVision.js's existing callQwenVisionRaw. If Qwen3-VL access
-// is later confirmed working, swapping QWEN_VISION_MODEL below is a
-// one-line change — this is called out explicitly in the POC report rather
-// than silently substituted.
+// Model choice: originally Qwen2.5-VL-72B-Instruct (via the HuggingFace
+// router) — same model already used (and previously live-verified working)
+// by quizVision.js's callQwenVisionRaw. Live-verified 2026-09-15 that the
+// account's HF_TOKEN has depleted its free monthly credits (HTTP 402 on
+// every call, confirmed against a real document via the deployed POC
+// route) — not a code problem, a real account-level quota exhaustion.
+// Switched to Mistral's Pixtral vision model (api.mistral.ai directly, a
+// different provider/API from the HF router) since MISTRAL_API_KEY already
+// exists (in the monolith's .env) and Groq's own model list was checked
+// live and currently has zero vision-capable models on this account —
+// ruling out reusing an already-working key. Gemini was deliberately not
+// substituted here since the entire point of this POC is to test a
+// Gemini-INDEPENDENT path. If Qwen access is restored later, swapping the
+// vision call back is a small, isolated change — not attempted silently.
 const fs = require('fs');
 const path = require('path');
 
@@ -75,8 +80,10 @@ Return ONLY this JSON shape (no markdown, no explanation):
 }`;
 }
 
-const QWEN_VISION_MODEL = 'Qwen/Qwen2.5-VL-72B-Instruct';
+const QWEN_VISION_MODEL = 'Qwen/Qwen2.5-VL-72B-Instruct'; // kept for reference / future swap-back
 const HF_TOKEN = process.env.HF_TOKEN;
+const MISTRAL_VISION_MODEL = 'pixtral-12b-2409';
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 
 // ── 1. Document normalization ─────────────────────────────────────────
 async function normalizeDocument(buffer, filename) {
@@ -213,30 +220,31 @@ For EACH visual element, return:
 Return ONLY a JSON object: { "visuals": [ ... ] }. No markdown, no explanation.`;
 
 async function detectVisualsOnPage(pageImage) {
-  if (!HF_TOKEN) throw new Error('HF_TOKEN not configured');
+  if (!MISTRAL_API_KEY) throw new Error('MISTRAL_API_KEY not configured');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 90000);
   try {
-    const res = await fetch('https://router.huggingface.co/v1/chat/completions', {
+    const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${HF_TOKEN}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${MISTRAL_API_KEY}`, 'Content-Type': 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        model: QWEN_VISION_MODEL,
+        model: MISTRAL_VISION_MODEL,
         messages: [{
           role: 'user',
           content: [
-            { type: 'image_url', image_url: { url: `data:${pageImage.mime};base64,${pageImage.buffer.toString('base64')}` } },
+            { type: 'image_url', image_url: `data:${pageImage.mime};base64,${pageImage.buffer.toString('base64')}` },
             { type: 'text', text: BBOX_PROMPT },
           ],
         }],
         max_tokens: 4096,
         temperature: 0,
+        response_format: { type: 'json_object' },
       }),
     });
     if (!res.ok) {
       const body = await res.text();
-      throw new Error(`HF router ${res.status}: ${body.slice(0, 200)}`);
+      throw new Error(`Mistral API ${res.status}: ${body.slice(0, 200)}`);
     }
     const json = await res.json();
     const raw = json.choices?.[0]?.message?.content || '';
