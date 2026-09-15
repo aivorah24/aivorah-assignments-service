@@ -981,7 +981,7 @@ router.post('/extract-questions-async', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const {
-      title, subject = '', chapter = '', dueDate, type = 'assignment', note = '',
+      title, subject = '', chapter = '', startDate = null, dueDate, type = 'assignment', note = '',
       studentId, studentName = null, createdById, createdByRole = 'teacher',
       grade = null, curriculum = null, questions = [], documentUrl = null, documentUrls = [],
       successCriteria = [], taskSteps = [], quizQuestions = [],
@@ -991,6 +991,9 @@ router.post('/', async (req, res) => {
     } = req.body;
 
     if (!title || !dueDate) return res.status(400).json({ error: 'title and dueDate required' });
+    if (startDate && new Date(startDate) > new Date(dueDate)) {
+      return res.status(400).json({ error: 'startDate cannot be after dueDate' });
+    }
     const normalizedQuizQuestions = normalizeQuizQuestions(Array.isArray(quizQuestions) ? quizQuestions : []);
     // Parents create plain-text question assignments — skip MCQ validation for parent-created items
     if (type === 'quiz' && normalizedQuizQuestions.length === 0 && createdByRole !== 'parent') {
@@ -1073,6 +1076,7 @@ router.post('/', async (req, res) => {
       .from('assignments')
       .insert({
         title, subject, chapter,
+        start_date:      startDate,
         due_date:        dueDate,
         type, note,
         student_id:      userId,
@@ -1194,6 +1198,7 @@ router.post('/', async (req, res) => {
     // student's calendar. Only when a real due date was set.
     try {
       const scheduleStudentId = userId || 'all';
+      const extractTime = (ds) => (ds && typeof ds === 'string' && ds.includes('T')) ? ds.split('T')[1].substring(0, 5) : '23:59';
       const { data: existing } = await supabase
         .from('schedule_events')
         .select('id')
@@ -1203,9 +1208,10 @@ router.post('/', async (req, res) => {
         const { error: schErr } = await supabase.from('schedule_events').insert({
           id:           crypto.randomUUID(),
           title:        `${title} — ${type === 'quiz' ? 'Quiz' : 'Assignment'} due`,
-          event_date:   dueDate,
-          start_time:   '23:59',
-          end_time:     '23:59',
+          event_date:   dueDate.includes('T') ? dueDate.split('T')[0] : dueDate,
+          start_date:   startDate ? (startDate.includes('T') ? startDate.split('T')[0] : startDate) : null,
+          start_time:   extractTime(startDate),
+          end_time:     extractTime(dueDate),
           type:         'deadline',
           note:         `${subject}${chapter ? ' · ' + chapter : ''}${finalGrade ? ' · ' + finalGrade : ''}`,
           student_id:   scheduleStudentId,
