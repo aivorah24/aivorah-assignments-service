@@ -326,6 +326,13 @@ function buildPageTaggedText(pageTexts) {
 // input via the [PAGE n] markers and the text's own ordering — the model
 // is asked to REPORT them, not infer or guess anything new. Still no grade,
 // still no hardcoded worksheet example, same as v1.
+//
+// SUPERSEDED 2026-09-15: a single combined call (decompose + tag page/order
+// in one pass) was live-tested twice and consistently collapsed question
+// decomposition from v1's 13 correct questions down to 6, even after adding
+// an explicit anti-collapse rule (kept below for reference/history, not
+// deleted, but no longer used by structureStage1V2 — see the two-call split
+// immediately after this function).
 function buildPocStage1PromptV2({ subject } = {}) {
   return `You are a precise document-extraction system for an educational worksheet${subject ? ` in ${subject}` : ''}.
 
@@ -370,8 +377,62 @@ async function structureStage1(text, { subject } = {}) {
   return { quiz: normalizeQuestionFields(quiz), raw };
 }
 
-// v2: takes page-tagged text, asks for pageIndex/order per question.
+// Second, minimal call: classifies which page each ALREADY-EXTRACTED
+// question came from. Runs only after decomposition is done, so it can't
+// compete with/degrade it (the failure mode found in the single-call v2
+// prompt above). "order" is NOT asked of the model at all — it's just the
+// question's index in the traversal below, which v1's rule "Preserve the
+// original ordering of tasks and questions" already guarantees is correct;
+// computing it locally removes one more thing that could go wrong.
+async function assignPageIndexes(quiz, pageTaggedText, { subject } = {}) {
+  const flatQuestions = [];
+  for (const task of quiz.tasks || []) {
+    for (const q of task.questions || []) flatQuestions.push({ task, q });
+  }
+  if (!flatQuestions.length) return quiz;
+
+  const numberedList = flatQuestions.map((entry, i) => `${i + 1}. [Task: ${entry.task.title}] ${entry.q.question}`).join('\n');
+  const prompt = `You are given a numbered list of questions already extracted from a document, and the document's own text (tagged with "[PAGE n]" markers showing which page each part appeared on).
+
+For EACH numbered question below, determine which page number its text actually appears on in the source. Do not re-extract, rephrase, or judge the questions — only classify their page.
+
+NUMBERED QUESTIONS:
+${numberedList}
+
+SOURCE TEXT (page-tagged):
+${pageTaggedText.slice(0, 12000)}
+
+Return ONLY this JSON shape (no markdown, no explanation): { "pages": [ { "n": 1, "pageIndex": 1 }, { "n": 2, "pageIndex": 1 } ] } — one entry per numbered question above, "n" matching its number, "pageIndex" the page it was found on. If you genuinely cannot tell, use the page of the nearest question you are confident about.`;
+
+  let pages = [];
+  try {
+    const raw = await callGroqWithText(prompt, { maxTokens: 4000 });
+    const parsed = JSON.parse(cleanLLMJson(raw));
+    pages = Array.isArray(parsed.pages) ? parsed.pages : [];
+  } catch { /* fall through — every question defaults to page 1 below, non-fatal */ }
+
+  const pageByN = new Map(pages.map(p => [p.n, p.pageIndex]));
+  flatQuestions.forEach((entry, i) => {
+    entry.q.pageIndex = Number.isFinite(pageByN.get(i + 1)) ? pageByN.get(i + 1) : 1;
+    entry.q.order = i + 1; // deterministic, never asked of the model
+  });
+  return quiz;
+}
+
+// v2: v1's proven decomposition (structureStage1, unchanged) followed by
+// the page-classification-only second call above — NOT the single combined
+// call (buildPocStage1PromptV2/the old structureStage1V2 body), which was
+// found to degrade question decomposition on live testing.
 async function structureStage1V2(pageTaggedText, { subject } = {}) {
+  const plainText = pageTaggedText.replace(/\[PAGE \d+\]\n?/g, '');
+  const { quiz, parseError, raw } = await structureStage1(plainText, { subject });
+  if (parseError) return { quiz, parseError, raw };
+  await assignPageIndexes(quiz, pageTaggedText, { subject });
+  return { quiz, raw };
+}
+
+// Retained for reference only — not called by runPocOnDocumentV2 anymore.
+async function structureStage1V2SingleCall(pageTaggedText, { subject } = {}) {
   const prompt = buildPocStage1PromptV2({ subject });
   const raw = await callGroqWithText(`${prompt}\n\nWORKSHEET TEXT:\n${pageTaggedText.slice(0, 12000)}`);
   let quiz;
