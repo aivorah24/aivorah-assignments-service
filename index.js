@@ -13,6 +13,13 @@ app.use('/curriculum', require('./routes/curriculum'));
 app.use('/jobs', require('./routes/jobs'));
 app.use('/quiz', require('./routes/quiz'));
 
+// EXPERIMENTAL / TEST-ONLY — Gemini-independent fallback POC (see
+// services/poc/fallbackPipelinePoc.js). Never mounted unless explicitly
+// enabled; does not replace or touch any production route above.
+if (process.env.POC_FALLBACK_ENABLED === 'true') {
+  app.use('/poc/fallback', require('./routes/pocFallback'));
+}
+
 require('./services/jobHandlers'); // register the worksheet_extract handler
 
 const PORT = process.env.PORT || 3015;
