@@ -335,6 +335,12 @@ RULES:
 1. Preserve the exact original wording of every question/instruction. Do not paraphrase.
 2. Preserve the original ordering of tasks and questions.
 3. Give each task a title (verbatim from the source if present) and a list of questions.
+3b. NEVER collapse multiple distinct numbered/lettered items, blanks, or sub-parts under one task
+    instruction into a single question object. If a task's instruction covers several separate items
+    each requiring its own answer (e.g. "a) ... b) ... c) ... d) ..." or several distinct blanks/rows
+    under one heading), emit ONE question object per item, each with its own "id" and its own
+    "answer"/"hint"/"solution" — do not merge them. Count the actual distinct answerable items in the
+    source for that task and make sure your output has that same count of question objects.
 4. Each question needs: "id" (unique within its task), "type" ("numeric" | "mcq" | "text"), "question" (verbatim text), "answer" (short, literal, derived by solving/reasoning about the extracted content), "hint" (short clue), "solution" (step-by-step explanation), "pageIndex" (the page number from the "[PAGE n]" marker the question's text appeared under), "order" (an integer giving this question's position in reading order across the WHOLE document — 1 for the first question anywhere in the document, 2 for the second, and so on, strictly increasing, never repeated).
 5. If the text contains a marker like "[IMAGE: url=...]" or "[DETECTED IMAGES ...]", note that a visual existed near that point, but do NOT invent a description of what it shows.
 6. Never invent content that isn't derivable from the text below. If a task/question cannot be completed from the given text alone, still include it with whatever real content exists, and leave "answer" as an empty string rather than guessing.
