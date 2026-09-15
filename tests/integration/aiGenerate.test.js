@@ -61,6 +61,20 @@ describe('POST /assignments/ai-generate — quiz generation (default)', () => {
 
     expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
   });
+
+  // Regression: this call was the one place in the file NOT using Groq's JSON
+  // mode (every other AI-generation call site does), relying instead on a
+  // fragile manual fence-strip that breaks the moment the model adds any
+  // preamble text - real, intermittent "AI returned invalid JSON" failures.
+  test('the real model call requests JSON mode, matching every other AI-generation call site in this service', async () => {
+    mockGroqCreate.mockResolvedValue(groqJson({ type: 'quiz', questions: [] }));
+
+    await request(app).post('/assignments/ai-generate').send({ prompt: 'anything', type: 'quiz' });
+
+    expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({
+      response_format: { type: 'json_object' },
+    }));
+  });
 });
 
 describe('POST /assignments/ai-generate — plain assignment (type: assignment)', () => {

@@ -1496,7 +1496,8 @@ Rules:
         { role: 'user', content: `Parent request: "${prompt.trim()}"` },
       ],
       temperature: 0.7,
-      max_tokens: 800,
+      max_tokens: 1200,
+      response_format: { type: 'json_object' },
     });
 
     const raw = completion.choices[0]?.message?.content?.trim() || '';
