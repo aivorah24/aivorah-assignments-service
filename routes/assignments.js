@@ -1076,7 +1076,12 @@ router.post('/', async (req, res) => {
       .from('assignments')
       .insert({
         title, subject, chapter,
-        start_date:      startDate,
+        // `assignments` has no start_date column (confirmed absent in both
+        // Dev and Test Supabase projects) — inserting it always threw
+        // "Could not find the 'start_date' column of 'assignments' in the
+        // schema cache" and blocked publishing entirely. `startDate` is
+        // still accepted/validated above and used for schedule_events'
+        // start_time below, just never written here.
         due_date:        dueDate,
         type, note,
         student_id:      userId,
@@ -1209,7 +1214,11 @@ router.post('/', async (req, res) => {
           id:           crypto.randomUUID(),
           title:        `${title} — ${type === 'quiz' ? 'Quiz' : 'Assignment'} due`,
           event_date:   dueDate.includes('T') ? dueDate.split('T')[0] : dueDate,
-          start_date:   startDate ? (startDate.includes('T') ? startDate.split('T')[0] : startDate) : null,
+          // schedule_events also has no start_date column (only start_time) —
+          // this insert is wrapped in a swallow-all catch below so it never
+          // surfaced as a user-facing error, but it silently failed on every
+          // assignment that set a start date, so the deadline never made it
+          // onto the student's calendar.
           start_time:   extractTime(startDate),
           end_time:     extractTime(dueDate),
           type:         'deadline',
