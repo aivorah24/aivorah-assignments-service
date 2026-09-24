@@ -1,0 +1,65 @@
+// Notification V2 producer: builds the business event and hands it to the DB
+// function notify_event() (aivorah-db 0006), which fans out to students + parents
+// idempotently. Never throws — the assignment is already saved when this runs.
+const supabase = require('./supabase');
+
+function logEvent(fields) {
+  console.log(JSON.stringify({ svc: 'assignments', ...fields }));
+}
+
+function formatDue(dueDate) {
+  if (!dueDate) return null;
+  const d = new Date(String(dueDate).includes('T') ? dueDate : `${dueDate}T00:00:00Z`);
+  return Number.isFinite(d.getTime())
+    ? d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
+    : null;
+}
+
+function assignmentAssignedEvent(assignment, { studentIds, actorEmail, actorRole }) {
+  const label = assignment.type === 'quiz' ? 'quiz' : 'assignment';
+  const due = formatDue(assignment.due_date);
+  const body = [assignment.subject || null, due ? `Due ${due}` : null].filter(Boolean).join(' · ') || null;
+  return {
+    type: 'assignment_assigned',
+    entity_type: 'assignment',
+    entity_id: String(assignment.id),
+    version: assignment.created_at,
+    student_ids: studentIds,
+    actor_email: actorEmail || null,
+    actor_role: actorRole || null,
+    title: `New ${label}: ${assignment.title}`,
+    body,
+    parent_title: `New ${label} for {child}: ${assignment.title}`,
+    parent_body: body,
+    data: {
+      assignmentId: String(assignment.id),
+      assignmentType: assignment.type || 'assignment',
+      subject: assignment.subject || null,
+      dueDate: assignment.due_date || null,
+    },
+  };
+}
+
+async function createNotificationEvent(evt) {
+  const base = { evt: 'notification.create', type: evt.type, entityType: evt.entity_type, entity: evt.entity_id };
+  if (!evt.student_ids?.length) {
+    logEvent({ ...base, ok: true, recipients: 0, inserted: 0, reason: 'no eligible students' });
+    return { ok: true, inserted: [], recipients: 0, duplicates: 0 };
+  }
+  try {
+    const { data, error } = await supabase.rpc('notify_event', { p_event: evt });
+    if (error) throw new Error(error.message);
+    const inserted = data?.inserted ?? [];
+    logEvent({
+      ...base, ok: true, eventKey: data?.eventKey, students: evt.student_ids.length,
+      recipients: data?.recipients ?? 0, inserted: inserted.length, duplicates: data?.duplicates ?? 0,
+      orphanParentLinks: data?.orphanParentLinks ?? 0, notificationIds: inserted.map(r => r.id),
+    });
+    return { ok: true, inserted, recipients: data?.recipients ?? 0, duplicates: data?.duplicates ?? 0 };
+  } catch (err) {
+    logEvent({ ...base, ok: false, students: evt.student_ids.length, reason: err.message });
+    return { ok: false, error: err.message };
+  }
+}
+
+module.exports = { assignmentAssignedEvent, createNotificationEvent, formatDue };

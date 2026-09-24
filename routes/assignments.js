@@ -63,6 +63,9 @@ const { normalizeCurriculum } = require('../utils/curriculum');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { publishJob } = require('../services/jobQueue');
 const { sendPush } = require('../services/push');
+const { isEligibleForClassAssignment } = require('../services/assignmentEligibility');
+const { resolveClassRecipients } = require('../services/assignmentRecipients');
+const { assignmentAssignedEvent, createNotificationEvent } = require('../services/notify');
 const { client: qdrantClient } = require('../services/qdrant');
 const { embed } = require('../services/embeddings');
 
@@ -1030,10 +1033,12 @@ router.post('/', async (req, res) => {
     let finalQuizHtml = interactiveQuizHtml || null;
     let creatorSchool = null;
     let creatorName = null;
+    let creatorEmailForNotify = String(createdById || '').includes('@') ? String(createdById).trim().toLowerCase() : null;
     if (creatorId) {
-      const { data: creator } = await supabase.from('users').select('school, name').eq('id', creatorId).maybeSingle();
+      const { data: creator } = await supabase.from('users').select('school, name, email').eq('id', creatorId).maybeSingle();
       creatorSchool = creator?.school || null;
       creatorName = creator?.name || null;
+      creatorEmailForNotify = creatorEmailForNotify || (creator?.email ? String(creator.email).toLowerCase() : null);
     }
     // ── Pre-publish validation gate, server-side defense-in-depth ──
     // The client validates too, but the server must never persist an interactive
@@ -1123,6 +1128,16 @@ router.post('/', async (req, res) => {
       .single();
 
     if (error) return res.status(500).json({ error: error.message });
+
+    // Notification V2 (runs alongside the legacy push + parent messages below).
+    try {
+      const studentIds = await resolveClassRecipients(data, creatorSchool);
+      await createNotificationEvent(assignmentAssignedEvent(data, {
+        studentIds, actorEmail: creatorEmailForNotify, actorRole: createdByRole,
+      }));
+    } catch (e) {
+      console.log(JSON.stringify({ svc: 'assignments', evt: 'notification.create', ok: false, entity: String(data.id), reason: e.message }));
+    }
 
     // Push-notify the targeted student + their parent on mobile (non-blocking).
     if (userId) {
@@ -1367,33 +1382,14 @@ router.get('/', async (req, res) => {
     (creators || []).forEach(c => { creatorSchoolMap[c.id] = c.school || null; });
   }
 
-  // For class-wide assignments (student_id is null), filter by BOTH curriculum AND grade.
-  // Curriculum is the partition key — a class-wide assignment must NOT leak across
-  // curricula. If the assignment is stamped with a curriculum, the student's curriculum
-  // must match it (and a student with no curriculum recorded can't be verified → hidden,
-  // rather than flooded). Grade is matched the same way.
+  // Class-wide items go through the same rule notification fan-out uses.
+  const student = { curriculum: studentCurriculum, grade: studentGrade, school: studentSchool };
   const filtered = (allData || []).filter(a => {
     if (a.student_id !== null) return true; // personal — explicitly targeted
-    if (a.curriculum) {
-      if (!studentCurriculum) return false;          // can't verify → don't leak
-      if (a.curriculum !== studentCurriculum) return false;
-    }
-    if (a.grade) {
-      if (studentGrade && a.grade !== studentGrade) return false;
-    }
-    // Teacher "All students" broadcast: only the teacher's own linked students see it.
-    // (Non-teacher broadcasts — e.g. school/admin — stay curriculum-wide.) A teacher
-    // broadcast with no creator id can't be attributed to any teacher — exclude it
-    // rather than falling back to showing it to every student in the curriculum.
-    if (a.created_by_role === 'teacher') {
-      if (!a.created_by_id || !studentTeacherIds.has(a.created_by_id)) return false;
-    }
-    // School scoping: same curriculum but a different school must NOT receive it.
-    if (a.created_by_id) {
-      const creatorSchool = creatorSchoolMap[a.created_by_id];
-      if (creatorSchool && studentSchool && creatorSchool !== studentSchool) return false;
-    }
-    return true;
+    return isEligibleForClassAssignment(a, student, {
+      studentTeacherIds,
+      creatorSchool: a.created_by_id ? creatorSchoolMap[a.created_by_id] : null,
+    });
   });
 
   // Fetch this student's submissions so each assignment shows their own score

@@ -24,6 +24,7 @@ function makeSupabaseMock() {
       or: jest.fn(() => chain),
       in: jest.fn(() => chain),
       order: jest.fn(() => chain),
+      range: jest.fn(() => chain),
       single: jest.fn(() => Promise.resolve(nextResponseFor(table))),
       maybeSingle: jest.fn(() => Promise.resolve(nextResponseFor(table))),
       upsert: jest.fn(() => Promise.resolve(nextResponseFor(table))),
@@ -37,6 +38,7 @@ function makeSupabaseMock() {
 
   const supabase = {
     from: jest.fn((table) => makeChain(table)),
+    rpc: jest.fn((fn) => Promise.resolve(nextResponseFor(`rpc:${fn}`))),
   };
 
   return {
