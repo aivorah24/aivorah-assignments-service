@@ -811,10 +811,8 @@ GENERAL RULES:
         let raw;
         try {
           if (!genAI) throw new Error('GEMINI_API_KEY not configured');
-          const model = genAI.getGenerativeModel({
-            model: 'gemini-2.5-flash',
-            generationConfig: { responseMimeType: 'application/json', temperature: 0 }
-          });
+          const { geminiModel } = require('../services/quizVision');
+          const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
           const result = await model.generateContent([
             { inlineData: { mimeType: file.mime || 'image/jpeg', data: file.base64 } },
             { text: extractPrompt },
