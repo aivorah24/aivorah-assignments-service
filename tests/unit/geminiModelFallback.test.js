@@ -34,6 +34,11 @@ test('a model retired for new users is skipped', async () => {
   await expect(geminiModel({}).generateContent(['x'])).resolves.toBe('C');
 });
 
+test('a per-model free-tier quota (429) moves on to the next model', async () => {
+  modelsBehaving({ 'model-a': new Error('[429 Too Many Requests] You exceeded your current quota'), 'model-b': 'B' });
+  await expect(geminiModel({}).generateContent(['x'])).resolves.toBe('B');
+});
+
 test('a billing/auth error is not hidden by trying other models', async () => {
   modelsBehaving({ 'model-a': new Error('[402 Payment Required] Your prepayment credits are depleted'), 'model-b': 'B' });
   await expect(geminiModel({}).generateContent(['x'])).rejects.toThrow(/credits are depleted/);

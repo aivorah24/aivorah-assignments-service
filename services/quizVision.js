@@ -22,7 +22,8 @@ function geminiModel(generationConfig) {
           return await genAI.getGenerativeModel({ model: name, generationConfig }).generateContent(content);
         } catch (e) {
           lastErr = e;
-          if (!/503|overloaded|unavailable|high demand|404|no longer available|not found/i.test(String((e && e.message) || e))) throw e;
+          // Free-tier quota is per model, so a 429 on one model is worth trying the next.
+          if (!/503|overloaded|unavailable|high demand|404|no longer available|not found|429|too many requests|quota|rate.?limit|resource_exhausted/i.test(String((e && e.message) || e))) throw e;
           console.log(`[gemini] ${name} unavailable, trying next model`);
         }
       }
