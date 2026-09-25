@@ -22,6 +22,7 @@ function makeSupabaseMock() {
       select: jest.fn(() => chain),
       eq: jest.fn(() => chain),
       or: jest.fn(() => chain),
+      is: jest.fn(() => chain),
       in: jest.fn(() => chain),
       order: jest.fn(() => chain),
       range: jest.fn(() => chain),

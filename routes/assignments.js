@@ -65,7 +65,18 @@ const { publishJob } = require('../services/jobQueue');
 const { sendPush } = require('../services/push');
 const { isEligibleForClassAssignment } = require('../services/assignmentEligibility');
 const { resolveClassRecipients } = require('../services/assignmentRecipients');
-const { assignmentAssignedEvent, createNotificationEvent } = require('../services/notify');
+const { assignmentAssignedEvent, createNotificationEvent, clearNotificationsForEntity } = require('../services/notify');
+
+// After a successful submit/complete (every 2xx is sent after the submission is saved),
+// clear the student's now-stale "new assignment" notifications.
+function clearNotificationsOnSuccess(req, res, next) {
+  res.on('finish', async () => {
+    if (res.statusCode >= 300 || !req.body?.studentId) return;
+    const studentId = await resolveUserId(req.body.studentId).catch(() => null);
+    if (studentId) await clearNotificationsForEntity({ entityId: req.params.id, studentId, reason: 'submitted' });
+  });
+  next();
+}
 const { client: qdrantClient } = require('../services/qdrant');
 const { embed } = require('../services/embeddings');
 
@@ -1881,7 +1892,7 @@ router.post('/docx-to-pdf', async (req, res) => {
 });
 
 // ── POST /assignments/:id/submit ──
-router.post('/:id/submit', async (req, res) => {
+router.post('/:id/submit', clearNotificationsOnSuccess, async (req, res) => {
   const { id } = req.params;
   // questionImages: [{ imageBase64: string|null, imageMime: string }] â€” one per question (new flow)
   // imageBase64 / imageMime â€” legacy single-image fallback
@@ -2808,7 +2819,7 @@ Respond ONLY as JSON:
 });
 
 // ── PUT /assignments/:id/complete ──
-router.put('/:id/complete', async (req, res) => {
+router.put('/:id/complete', clearNotificationsOnSuccess, async (req, res) => {
   const { id } = req.params;
   const { score = null, studentId, answers, correct, total } = req.body;
 
@@ -2851,6 +2862,7 @@ router.delete('/:id', async (req, res) => {
   try { await supabase.from('schedule_events').delete().eq('assignment_id', id); } catch (_) {}
   const { error } = await supabase.from('assignments').delete().eq('id', id);
   if (error) return res.status(500).json({ error: error.message });
+  await clearNotificationsForEntity({ entityId: id, reason: 'deleted' });
   res.json({ ok: true });
 });
 

@@ -62,4 +62,27 @@ async function createNotificationEvent(evt) {
   }
 }
 
-module.exports = { assignmentAssignedEvent, createNotificationEvent, formatDue };
+// Clears (marks read) open notifications for an assignment: a student's (and their
+// parents' rows about that child) after they submit, or everyone's after a delete. Never throws.
+async function clearNotificationsForEntity({ entityId, studentId, reason }) {
+  const base = { evt: 'notification.clear', entityType: 'assignment', entity: String(entityId), reason };
+  try {
+    let q = supabase
+      .from('notifications')
+      .update({ read_at: new Date().toISOString() })
+      .eq('entity_type', 'assignment')
+      .eq('entity_id', String(entityId))
+      .is('read_at', null);
+    // Without a student (assignment deleted) every recipient's row is stale.
+    if (studentId) q = q.or(`recipient_id.eq.${studentId},child_id.eq.${studentId}`);
+    const { data, error } = await q.select('id');
+    if (error) throw new Error(error.message);
+    logEvent({ ...base, ok: true, cleared: (data || []).length });
+    return { ok: true, cleared: (data || []).length };
+  } catch (err) {
+    logEvent({ ...base, ok: false, reason: err.message });
+    return { ok: false, error: err.message };
+  }
+}
+
+module.exports = { assignmentAssignedEvent, createNotificationEvent, clearNotificationsForEntity, formatDue };
