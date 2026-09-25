@@ -8,6 +8,28 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// Comma-separated, tried in order: newer Google projects can't use gemini-2.5-flash,
+// and single models are often "high demand" (503) on the free tier.
+const GEMINI_MODELS = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').split(',').map(m => m.trim()).filter(Boolean);
+
+// Same shape as a Gemini model; an overloaded or retired model moves on to the next instead of waiting.
+function geminiModel(generationConfig) {
+  return {
+    async generateContent(content) {
+      let lastErr;
+      for (const name of GEMINI_MODELS) {
+        try {
+          return await genAI.getGenerativeModel({ model: name, generationConfig }).generateContent(content);
+        } catch (e) {
+          lastErr = e;
+          if (!/503|overloaded|unavailable|high demand|404|no longer available|not found/i.test(String((e && e.message) || e))) throw e;
+          console.log(`[gemini] ${name} unavailable, trying next model`);
+        }
+      }
+      throw lastErr;
+    },
+  };
+}
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 
 // ── PDF embedded-image extraction — NO AI vision required ────────────────
@@ -444,12 +466,9 @@ function classifyProviderError(providerName, err) {
 // ── Gemini Vision — primary engine (free, excellent accuracy) ────────────────
 async function callGeminiVision(parts, { grade, subject, school, structuredText } = {}) {
   if (!genAI) throw new Error('GEMINI_API_KEY not configured');
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-2.5-flash',
-    // temperature: 0 — a pure reading task, not a creative one; without this
-    // Gemini defaults to ~1.0 and gives a different "guess" run to run.
-    generationConfig: { responseMimeType: 'application/json', temperature: 0 }
-  });
+  // temperature: 0 — a pure reading task, not a creative one; without this
+  // Gemini defaults to ~1.0 and gives a different "guess" run to run.
+  const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
   let prompt = buildQuizVisionPrompt({ grade, subject, school });
   // Ground-truth supplement for docx-sourced uploads, added 2026-09-12: the
   // PDF Gemini sees here is a flattened RENDER of the original docx, so any
@@ -1033,7 +1052,7 @@ async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school
   let raw, retryFn, visualUnderstandingAvailable = true, sourceText = '';
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
     retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt }]);
   } catch (geminiErr) {
     classifyProviderError('gemini', geminiErr);
@@ -1383,7 +1402,7 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
   let raw, retryFn, visualUnderstandingAvailable = true, sourceText = '';
   try {
     raw = await withTimeout(callGeminiVision(parts, { grade, subject, school, structuredText }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash', generationConfig: { responseMimeType: 'application/json', temperature: 0 } });
+    const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
     let retryPromptSuffix = '';
     if (structuredText && structuredText.trim().length > 20) {
       retryPromptSuffix = `\n\nGROUND TRUTH TEXT (exact - use these values, do not guess from the image):\n${structuredText.slice(0, 12000)}`;
@@ -1419,7 +1438,7 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
 
 module.exports = {
   generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText, extractPdfEmbeddedImages, hostExtractedImages,
-  geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, withTimeout, GEMINI_VISION_TIMEOUT_MS,
+  geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, geminiModel, withTimeout, GEMINI_VISION_TIMEOUT_MS,
   PROVIDER_STATUS, classifyProviderError,
   enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
   computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
