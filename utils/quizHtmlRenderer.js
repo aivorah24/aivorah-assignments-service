@@ -546,6 +546,16 @@ function fmt(text) {
   if (!text) return '';
   return escapeHtml(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 }
+// Solution text: escape first, then add markup (adding tags before fmt() showed them as literal text).
+function fmtSolution(text, { steps = false, units = false, sentences = false } = {}) {
+  let s = fmt(text);
+  if (sentences) s = s.replace(/\. /g, '.<br>');
+  if (steps) s = s.replace(/Step (\d)/g, '<br>Step $1');
+  s = s.replace(/Answer:/g, '<br><strong>Answer:</strong>');
+  // Whole units only, so "900 ml" is not split into "900 m" + "l".
+  if (units) s = s.replace(/(\d+(?:\.\d+)?)\s*(m²|cm²|km|mm|cm|m|tiles)(?![A-Za-z²])/g, '<strong>$1 $2</strong>');
+  return s;
+}
 
 function renderQuizHTML(quiz, branding = {}) {
   normalizeVennQuestions(quiz);
@@ -793,7 +803,7 @@ function renderQuizHTML(quiz, branding = {}) {
     // Industry norm (Khan Academy, Google) is to ACCEPT any genuine attempt and
     // reveal the worked solution to learn from — so route these to the open-ended
     // path (auto-accept once attempted + show solution), never a hard red fail.
-    const isExplanatory = /\b(identify the mistake|what went wrong|correct working|explain (what|why|how)|describe (how|why)|find the error)\b/i.test(q.question || '');
+    const isExplanatory = /\b(identify the mistake|what went wrong|correct working|explain|justify|show your (thinking|working)|give (a )?reasons?|describe (how|why)|find the error)\b/i.test(q.question || '');
 
     if (isMcq) {
       const correctIdx = (q.options || []).findIndex(o => o.correct);
@@ -1030,7 +1040,7 @@ function renderQuizHTML(quiz, branding = {}) {
       const baseTaStyle = 'position:absolute;box-sizing:border-box;resize:none;border:1.5px dashed rgba(195,220,216,0.5);border-radius:8px;background:rgba(255,255,255,0.06);color:#F0EEEC;font-size:13px;font-family:inherit;padding:6px 8px;text-align:center;';
       const ta = (rid, ph, pos) =>
         `<textarea id="${qId}-${rid}" class="venn-input" placeholder="${ph}" style="${baseTaStyle}${pos}"></textarea>`;
-      const solutionText = (q.solution || '').replace(/\. /g, '.<br>');
+      const solutionHtml = fmtSolution(q.solution || '', { sentences: true });
       return `<div class="q-card" id="${qId}-card">
         <p class="q-text"><strong>${q.id ? q.id + ')' : 'Q' + qNum + '.'}</strong> ${fmtQuestion(q.question)}</p>
         <p style="font-size:12px;color:#A8B5B3;margin:2px 0 0;">Type items separated by commas — shared items go in the middle.</p>
@@ -1051,7 +1061,7 @@ function renderQuizHTML(quiz, branding = {}) {
         </div>
         <div id="${qId}-hint" class="hint-box" style="display:none">${fmt(q.hint || '')}</div>
         <div id="${qId}-result" class="result-box"></div>
-        <div id="${qId}-solution" class="solution-box" style="display:none"><strong>&#9989; Solution</strong><br>${fmt(solutionText)}</div>
+        <div id="${qId}-solution" class="solution-box" style="display:none"><strong>&#9989; Solution</strong><br>${solutionHtml}</div>
         <button id="${qId}-show" class="btn-show" style="display:none" onclick="toggleSolution('${qId}')">Show Answer</button>
       </div>`;
     }
@@ -1094,10 +1104,10 @@ function renderQuizHTML(quiz, branding = {}) {
       }
       html += `</div></div>`;
       // Feedback row (hidden by default, spans full width)
-      const solutionText = (q.solution || '').replace(/Step (\d)/g, '<br>Step $1').replace(/Answer:/g, '<br><strong>Answer:</strong>');
+      const solutionHtml = fmtSolution(q.solution || '', { steps: true });
       html += `<div id="${qId}-hint" class="hint-box" style="display:none;margin:0 14px;font-size:13px;">${fmt(q.hint || '')}</div>`;
       html += `<div id="${qId}-result" class="result-box" style="margin:0 14px;"></div>`;
-      html += `<div id="${qId}-solution" class="solution-box" style="display:none;margin:0 14px;font-size:13px;"><strong>&#9989;</strong> ${fmt(solutionText)}</div>`;
+      html += `<div id="${qId}-solution" class="solution-box" style="display:none;margin:0 14px;font-size:13px;"><strong>&#9989;</strong> ${solutionHtml}</div>`;
       html += `<button id="${qId}-show" class="btn-show" style="display:none;margin:4px 14px;font-size:11px;" onclick="toggleSolution('${qId}')">Show Answer</button>`;
     } else if (isLanguageWorksheet) {
       // ── Language worksheet layout: clean, document-like ──
@@ -1139,11 +1149,11 @@ function renderQuizHTML(quiz, branding = {}) {
         html += `</div></div>`;
       }
 
-      const solutionText = (q.solution || '').replace(/Answer:/g, '<br><strong>Answer:</strong>');
+      const solutionHtml = fmtSolution(q.solution || '');
       html += `
         <div id="${qId}-hint" class="hint-box" style="display:none;margin:4px 0 4px 36px;font-size:13px;">${fmt(q.hint || '')}</div>
         <div id="${qId}-result" class="lang-result"></div>
-        <div id="${qId}-solution" class="solution-box" style="display:none;margin:4px 0 4px 36px;font-size:13px;"><strong>&#9989;</strong> ${fmt(solutionText)}</div>
+        <div id="${qId}-solution" class="solution-box" style="display:none;margin:4px 0 4px 36px;font-size:13px;"><strong>&#9989;</strong> ${solutionHtml}</div>
         <button id="${qId}-show" class="btn-show" style="display:none;margin:4px 36px;font-size:11px;" onclick="toggleSolution('${qId}')">Show Answer</button>
       </div>`;
     } else {
@@ -1243,12 +1253,12 @@ function renderQuizHTML(quiz, branding = {}) {
         }
       }
 
-      const solutionText = (q.solution || '').replace(/Step (\d)/g, '<br>Step $1').replace(/Answer:/g, '<br><strong>Answer:</strong>').replace(/(\d+(?:\.\d+)?)\s*(m²|cm²|km|m|cm|mm|tiles)/g, '<strong>$1 $2</strong>');
+      const solutionHtml = fmtSolution(q.solution || '', { steps: true, units: true });
       html += `
         <div id="${qId}-hint" class="hint-box" style="display:none">${fmt(q.hint || '')}</div>
         <div id="${qId}-result" class="result-box"></div>
         <div id="${qId}-solution" class="solution-box" style="display:none">
-          <strong>&#9989; Solution</strong><br>${fmt(solutionText)}
+          <strong>&#9989; Solution</strong><br>${solutionHtml}
           ${q.acceptRange ? `<br><span style="font-size:12px;color:#666">(any answer ${q.acceptRange[0]}–${q.acceptRange[1]} is accepted)</span>` : ''}
         </div>
         <button id="${qId}-show" class="btn-show" style="display:none" onclick="toggleSolution('${qId}')">Show Answer</button>

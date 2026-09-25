@@ -123,3 +123,40 @@ describe('solveVerticalMath', () => {
     expect(result.solvedTopStr).toBe('23');
   });
 });
+
+describe('solution formatting and explanation questions', () => {
+  const answersOf = (html) => JSON.parse(html.match(/const answers = (\{.*?\});\n/s)[1]);
+  const render = (q) => renderQuizHTML({ tasks: [{ title: 'Task', questions: [{ id: 'a', ...q }] }] }, {});
+
+  test('solution markup renders as HTML, never as literal escaped tags', () => {
+    const html = render({ type: 'text', question: 'How much?', answer: '2700 ml', solution: 'Step 1 add. Step 2 compare. Answer: 12 m' });
+    expect(html).not.toMatch(/&lt;(strong|br)&gt;/);
+    expect(html).toContain('<br><strong>Answer:</strong>');
+  });
+
+  test('units are bolded whole, so "900 ml" is not split into "900 m" + "l"', () => {
+    const html = render({ type: 'text', question: 'Total?', answer: '2700 ml', solution: '3 × 900 ml = 2700 ml. The fence is 12 m long.' });
+    expect(html).toContain('900 ml');
+    expect(html).not.toContain('900 m</strong>l');
+    expect(html).toContain('<strong>12 m</strong>');
+  });
+
+  test('user-supplied angle brackets in a solution are still escaped', () => {
+    const html = render({ type: 'text', question: 'Compare', answer: 'x', solution: '3 < 5 <script>' });
+    expect(html).toContain('3 &lt; 5 &lt;script&gt;');
+  });
+
+  test.each([
+    'Can three 900 ml bottles be poured into a 2900 l jar? Explain.',
+    'Is 3/4 bigger than 2/3? Justify your answer.',
+    'Solve 12 × 4 and show your thinking.',
+  ])('"%s" accepts any genuine attempt (open-ended) instead of exact match', (question) => {
+    const html = render({ type: 'text', question, answer: 'Yes, because 2700 ml is less than 2900 l.', solution: 'x' });
+    expect(answersOf(html).q1.open).toBe(true);
+  });
+
+  test('a plain numeric question still uses strict checking', () => {
+    const html = render({ type: 'numeric', question: '4 kg = ___ g', answer: '4000' });
+    expect(answersOf(html).q1.open).toBeFalsy();
+  });
+});
