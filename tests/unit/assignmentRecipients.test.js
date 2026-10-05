@@ -12,7 +12,7 @@ const users = [
   { id: 's2', role: 'student', curriculum: 'CBSE', grade: 'Grade 5', school: 'A' }, // wrong grade
   { id: 's3', role: 'student', curriculum: 'ICSE', grade: 'Grade 4', school: 'A' }, // wrong curriculum
   { id: 's4', role: 'student', curriculum: 'CBSE', grade: 'Grade 4', school: 'B' }, // other school
-  { id: 's5', role: 'student', curriculum: 'CBSE', grade: null, school: 'A' },       // no grade → eligible
+  { id: 's5', role: 'student', curriculum: 'CBSE', grade: null, school: 'A' },       // no grade → not eligible for a graded item
   { id: 's6', role: 'student', curriculum: 'CBSE', grade: 'Grade 4', school: 'A' }, // not linked to t1
   { id: 'p1', role: 'parent', curriculum: 'CBSE', grade: 'Grade 4', school: 'A' },  // not a student
 ];
@@ -31,7 +31,7 @@ test('individual assignment → exactly that student, no queries', async () => {
 });
 
 test('teacher broadcast → only that teacher’s linked students who pass curriculum/grade/school', async () => {
-  expect(await resolveClassRecipients(classWide(), 'A')).toEqual(['s1', 's5']);
+  expect(await resolveClassRecipients(classWide(), 'A')).toEqual(['s1']);
 });
 
 test('teacher broadcast with no linked students → nobody', async () => {
@@ -45,12 +45,12 @@ test('teacher broadcast without a creator id → nobody (matches GET /assignment
 
 test('non-teacher broadcast → curriculum-wide students, school-scoped, no teacher link needed', async () => {
   const r = await resolveClassRecipients(classWide({ created_by_role: 'school_admin', created_by_id: 'admin1' }), 'A');
-  expect(r).toEqual(['s1', 's5', 's6']);
+  expect(r).toEqual(['s1', 's6']);
 });
 
 test('non-teacher, untagged curriculum → every student in the creator school with a matching grade', async () => {
   const r = await resolveClassRecipients(classWide({ created_by_role: 'school_admin', created_by_id: 'admin1', curriculum: null }), 'A');
-  expect(r).toEqual(['s1', 's3', 's5', 's6']);
+  expect(r).toEqual(['s1', 's3', 's6']);
 });
 
 test('reads past the 1000-row page limit', async () => {

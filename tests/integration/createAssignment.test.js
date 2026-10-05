@@ -1,5 +1,6 @@
 const { makeSupabaseMock } = require('../helpers/supabaseMock');
 const mockSb = makeSupabaseMock();
+const defaultFrom = mockSb.supabase.from.getMockImplementation();
 jest.mock('../../services/supabase', () => mockSb.supabase);
 
 const request = require('supertest');
@@ -241,5 +242,46 @@ describe('POST /assignments', () => {
       expect(res.status).toBe(500);
       expect(res.body.error).toMatch(/foreign key constraint/);
     });
+  });
+});
+
+describe('POST /assignments — every assignment needs a known student or a known owner', () => {
+  // Earlier tests swap in their own `from` implementation and don't restore it.
+  beforeEach(() => mockSb.supabase.from.mockImplementation(defaultFrom));
+
+  test('a studentId that does not resolve is rejected, never saved as class-wide', async () => {
+    mockSb.setTable('users', { data: null, error: null });
+
+    const res = await request(app).post('/assignments').send({
+      title: 'For my child', dueDate: '2026-09-01', curriculum: 'CBSE', grade: 'Grade 9',
+      studentId: 'missing-child@example.com', createdById: TEACHER_UUID,
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/student not found/i);
+  });
+
+  test('a class-wide assignment whose creator does not resolve is rejected', async () => {
+    mockSb.setTable('users', { data: null, error: null });
+
+    const res = await request(app).post('/assignments').send({
+      title: 'Class-wide', dueDate: '2026-09-01', curriculum: 'CBSE', grade: 'Grade 9',
+      createdById: 'ghost@example.com',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/owner/i);
+  });
+
+  test('a parent cannot create a class-wide assignment', async () => {
+    mockSb.setTable('users', { data: { id: TEACHER_UUID, school: null, name: 'Parent', email: 'p@example.com' }, error: null });
+
+    const res = await request(app).post('/assignments').send({
+      title: 'For everyone', dueDate: '2026-09-01', curriculum: 'CBSE', grade: 'Grade 9',
+      createdById: TEACHER_UUID, createdByRole: 'parent',
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/child/i);
   });
 });
