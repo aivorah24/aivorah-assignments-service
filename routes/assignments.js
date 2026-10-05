@@ -1014,6 +1014,12 @@ router.post('/', async (req, res) => {
 
     const userId    = studentId   ? await resolveUserId(studentId)   : null;
     const creatorId = createdById ? await resolveUserId(createdById) : null;
+    // Never fall back to class-wide when the target or owner is unknown.
+    if (studentId && !userId) return res.status(404).json({ error: 'Student not found' });
+    if (!userId && createdByRole === 'parent') {
+      return res.status(400).json({ error: 'A parent assignment must be for a specific child' });
+    }
+    if (!userId && !creatorId) return res.status(400).json({ error: 'A class-wide assignment needs a known owner' });
     if (userId) await ensureLocalStudent(userId, studentName, grade, curriculum);
 
     // ── Curriculum partitioning ────────────────────────────────────────────
@@ -1341,14 +1347,17 @@ router.get('/', async (req, res) => {
   if (!studentId) return res.status(400).json({ error: 'studentId or teacherId required' });
 
   const userId = await resolveUserId(studentId);
+  if (!userId) return res.json([]);
 
   // Fetch student's curriculum, grade, school, and join date for filtering
   let studentCurriculum = null;
   let studentGrade = null;
   let studentSchool = null;
   let studentJoinedAt = null;
+  let studentKnown = false;
   if (userId) {
     const { data: uData } = await supabase.from('users').select('curriculum, grade, school, created_at').eq('id', userId).single();
+    studentKnown = !!uData;
     studentCurriculum = uData?.curriculum || null;
     studentGrade = uData?.grade || null;
     studentSchool = uData?.school || null;
@@ -1395,6 +1404,7 @@ router.get('/', async (req, res) => {
   const student = { curriculum: studentCurriculum, grade: studentGrade, school: studentSchool };
   const filtered = (allData || []).filter(a => {
     if (a.student_id !== null) return true; // personal — explicitly targeted
+    if (!studentKnown) return false;
     return isEligibleForClassAssignment(a, student, {
       studentTeacherIds,
       creatorSchool: a.created_by_id ? creatorSchoolMap[a.created_by_id] : null,

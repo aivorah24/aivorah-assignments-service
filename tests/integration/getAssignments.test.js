@@ -214,3 +214,54 @@ describe('GET /assignments — interactive quiz HTML live regeneration', () => {
     expect(res.body[0].interactiveQuizHtml).toBeNull();
   });
 });
+
+describe('GET /assignments — deny by default (no owner / no audience means not shown)', () => {
+  test('an unknown student gets no assignments at all, not the class-wide ones', async () => {
+    mockSb.setTable('users', { data: null, error: null });
+    mockSb.setTable('assignments', {
+      data: [assignmentRow({ id: 'orphan', student_id: null, created_by_id: TEACHER_UUID, created_by_role: 'school_admin', curriculum: null, grade: null })],
+      error: null,
+    });
+
+    const res = await request(app).get('/assignments?studentId=nobody@example.com');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  test('hides a class-wide assignment that has no owner', async () => {
+    mockSb.setTable('users', [
+      { data: usersRow({ curriculum: 'CBSE', grade: 'Grade 9' }), error: null },
+      { data: [], error: null },
+    ]);
+    mockSb.setTable('assignments', {
+      data: [assignmentRow({ id: 'no-owner', student_id: null, created_by_id: null, created_by_role: 'parent', curriculum: 'CBSE', grade: 'Grade 9' })],
+      error: null,
+    });
+    mockSb.setTable('teacher_student', { data: [], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.map(a => a.id)).not.toContain('no-owner');
+  });
+
+  test('hides a graded class-wide assignment from a student whose grade is not set', async () => {
+    mockSb.setTable('users', [
+      { data: usersRow({ curriculum: 'CBSE', grade: null }), error: null },
+      { data: [{ id: TEACHER_UUID, school: null }], error: null },
+    ]);
+    mockSb.setTable('assignments', {
+      data: [assignmentRow({ id: 'g9', student_id: null, created_by_id: TEACHER_UUID, curriculum: 'CBSE', grade: 'Grade 9' })],
+      error: null,
+    });
+    mockSb.setTable('teacher_student', { data: [{ teacher_id: TEACHER_UUID }], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.map(a => a.id)).not.toContain('g9');
+  });
+});
