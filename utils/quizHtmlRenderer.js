@@ -6,6 +6,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const { dominantScript, requiredScript, isWrongScript, normalizeAnswer, matchesAnyAnswer } = require('./answerCheck');
 
 function solveVerticalMath(vm) {
   if (!vm || !vm.top || !vm.bottom) return { solvable: false };
@@ -779,6 +780,9 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
   const langInfo = findLang(detectedLang);
   const translitLang = langInfo && langInfo.translit ? langInfo : null;
   const isFrench = detectedLang === 'fr';
+  // The writing system answers must use (Tamil typed on a Telugu sheet is wrong).
+  const LANG_SCRIPT = { te: 'Telugu', hi: 'Devanagari', mr: 'Devanagari', sa: 'Devanagari', ne: 'Devanagari', ta: 'Tamil', kn: 'Kannada', ml: 'Malayalam', bn: 'Bengali', gu: 'Gujarati', pa: 'Gurmukhi', or: 'Oriya', ur: 'Arabic', ar: 'Arabic', zh: 'Han', ja: 'Kana', ko: 'Hangul', ru: 'Cyrillic', el: 'Greek' };
+  const worksheetScript = LANG_SCRIPT[detectedLang] || 'Latin';
   // dir="auto" lets Arabic/Urdu answers type right-to-left; autocomplete/spellcheck
   // off so the browser doesn't "correct" non-English words.
   const inputLangAttr = detectedLang !== 'en'
@@ -848,7 +852,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     const isTheory = typeof ansRaw === 'string' && !isNum && !isFraction && !hasDigit && hasDefinedAnswer &&
       (() => {
         const tokens = ansRaw.trim().split(/\s+/);
-        const alphaTokens = tokens.filter(t => /^[a-zA-Z][a-zA-Z''-]*$/.test(t));
+        const alphaTokens = tokens.filter(t => /^\p{L}/u.test(t)); // any script, not just Latin
         return alphaTokens.length >= 1; // any pure-text answer, incl. a single word
       })();
     // "Identify the mistake / write the correct working / explain what went wrong"
@@ -868,7 +872,14 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     } else if (isActivity) {
       answersMap[qId] = { answer: ansRaw, isNum: false, activity: true };
     } else {
-      answersMap[qId] = { answer: ansRaw, isNum: isNum && !isExplanatory, range: q.acceptRange || null, open: isOpenEnded || isExplanatory, theory: isTheory && !isExplanatory };
+      answersMap[qId] = {
+        answer: ansRaw, isNum: isNum && !isExplanatory, range: q.acceptRange || null,
+        // No answer key at all → record it (a strict compare against "" could
+        // never pass); unless it's a genuinely open prompt, the teacher reviews it.
+        open: isOpenEnded || isExplanatory || !hasDefinedAnswer, theory: isTheory && !isExplanatory,
+        alts: Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers.map(String) : [],
+        review: !hasDefinedAnswer && (!!q.visualUnderstandingRequired || !isOpenEnded),
+      };
     }
     return qId;
   }
@@ -1852,6 +1863,20 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       } catch (e) {}
       return '';
     })();
+    // Answer checks shared with the server (utils/answerCheck.js).
+    ${dominantScript.toString()}
+    ${requiredScript.toString()}
+    ${isWrongScript.toString()}
+    ${normalizeAnswer.toString()}
+    ${matchesAnyAnswer.toString()}
+    const WORKSHEET_SCRIPT = ${JSON.stringify(worksheetScript)};
+    const SCRIPT_NAMES = { Devanagari: 'Hindi (Devanagari)', Han: 'Chinese', Kana: 'Japanese', Hangul: 'Korean', Oriya: 'Odia', Gurmukhi: 'Punjabi (Gurmukhi)' };
+    // Server feedback text → safe HTML (escaped, **bold** kept).
+    function fmt(t) {
+      return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/[*][*](.+?)[*][*]/g, '<strong>$1</strong>');
+    }
+    function keysOf(a) { return [a.answer].concat(a.alts || []).filter(function(x) { return x != null && String(x).trim(); }).map(String); }
     let sc = 0;
     const tot = ${qNum};
     const done = new Set(); // questions answered CORRECTLY (drives score credit)
@@ -1980,13 +2005,24 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       const val = inp.value.trim();
       if (!val) { inp.style.borderColor = '#C5BD96'; return; }
       const r = document.getElementById(id + '-result');
+      // Wrong writing system (e.g. Tamil typed on a Telugu worksheet) is never
+      // accepted — not even on open questions with no answer key.
+      if (!a.isNum && isWrongScript(val, a.answer == null ? '' : String(a.answer), WORKSHEET_SCRIPT)) {
+        const need = requiredScript(a.answer == null ? '' : String(a.answer), WORKSHEET_SCRIPT);
+        r.innerHTML = '<span style="color:#c9605f;font-weight:700">Please write your answer in ' + (SCRIPT_NAMES[need] || need) + '.</span>';
+        inp.style.borderColor = '#c9605f';
+        inp.style.background = 'rgba(201,96,95,0.10)';
+        return;
+      }
       // Open-ended (reflection) questions have no single correct text — any written
       // response counts as answered, so completion isn't blocked waiting for an exact match.
       if (a.open) {
         const elapsedOpen = questionStartTimes[id] ? Math.round((Date.now() - questionStartTimes[id]) / 1000) : 0;
-        studentAnswers[id] = { answer: val, correct: true, timeSpent: elapsedOpen, question: '' };
+        studentAnswers[id] = { answer: val, correct: true, timeSpent: elapsedOpen, question: '', needsReview: !!a.review };
         attempted.add(id);
-        r.innerHTML = '<span style="color:#4a9d6e;font-weight:700">&#10004; Answer recorded</span>';
+        r.innerHTML = a.review
+          ? '<span style="color:#C5BD96;font-weight:700">&#10004; Answer recorded — your teacher will check it</span>'
+          : '<span style="color:#4a9d6e;font-weight:700">&#10004; Answer recorded</span>';
         inp.style.borderColor = '#4a9d6e';
         inp.style.background = 'rgba(74,157,110,0.14)';
         if (!done.has(id)) { sc += creditFor(id); done.add(id); }
@@ -2005,7 +2041,12 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // solar energy into glucose" for an expected answer about sunlight/food)
       // isn't wrongly marked incorrect just because the words don't overlap.
       if (a.theory) {
-        const okTh = keywordMatch(val, String(a.answer));
+        // Exact answer (any accepted wording) always counts. Keyword overlap is an
+        // English-paraphrase heuristic: for Telugu/Hindi… spelling IS the exercise
+        // ("rewrite with the correct ottu"), so those go straight to the exact
+        // check and then the server.
+        const latinKey = dominantScript(String(a.answer)) === 'Latin';
+        const okTh = matchesAnyAnswer(val, keysOf(a)) || (latinKey && keywordMatch(val, String(a.answer)));
         const elapsedTh = questionStartTimes[id] ? Math.round((Date.now() - questionStartTimes[id]) / 1000) : 0;
         if (okTh) {
           studentAnswers[id] = { answer: val, correct: true, timeSpent: elapsedTh, question: '' };
@@ -2029,7 +2070,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           const qText0 = qEl0 ? (qEl0.querySelector('.q-label, strong')?.textContent || '') : '';
           const gRes = await fetch(API_BASE + '/quiz/grade-answer', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ expected: String(a.answer), student: val, question: qText0 }),
+            body: JSON.stringify({ expected: String(a.answer), student: val, question: qText0, acceptableAnswers: a.alts || [], worksheetScript: WORKSHEET_SCRIPT }),
           });
           if (gRes.ok) semanticResult = await gRes.json();
         } catch (e) { /* network hiccup — fall back to Tier 1's "wrong" */ }
@@ -2065,7 +2106,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         if (isNaN(v)) { inp.style.borderColor = '#C5BD96'; return; }
         ok = a.range ? (v >= a.range[0] && v <= a.range[1]) : Math.abs(v - a.answer) < 0.01;
       } else {
-        ok = val.normalize('NFC').replace(/\\s+/g,'').toLowerCase() === String(a.answer).normalize('NFC').replace(/\\s+/g,'').toLowerCase();
+        ok = matchesAnyAnswer(val, keysOf(a));
       }
       // Track student answer + time
       const elapsed = questionStartTimes[id] ? Math.round((Date.now() - questionStartTimes[id]) / 1000) : 0;
@@ -2351,7 +2392,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         var v = parseFloat(val);
         ok = !isNaN(v) && (a.range ? (v >= a.range[0] && v <= a.range[1]) : Math.abs(v - a.answer) < 0.01);
       } else {
-        ok = val.normalize('NFC').replace(/\\s+/g, '').toLowerCase() === String(a.answer).normalize('NFC').replace(/\\s+/g, '').toLowerCase();
+        ok = matchesAnyAnswer(val, [String(a.answer)]);
       }
       inp.style.borderColor = ok ? '#4a9d6e' : '#c9605f';
       inp.style.background = ok ? 'rgba(74,157,110,0.14)' : 'rgba(201,96,95,0.10)';

@@ -145,25 +145,28 @@ describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', 
     expect(groqPromptText).toMatch(/Worksheet/); // the real Tesseract-OCR'd heading made it into Groq's prompt
   }, 30000);
 
-  test('a real Gemini failure, when pdf-parse already got enough real text, skips Qwen OCR entirely and structures directly via Groq', async () => {
-    // This fixture's real embedded text (pdf-parse) is already >300 chars
-    // (the printed instruction headers), so the >=300-char threshold means
-    // Qwen OCR is never even attempted here - Groq structures straight
-    // from pdf-parse's text. global.fetch is deliberately NOT mocked to
-    // succeed, to prove OCR truly isn't reached in this case.
+  // Was: "pdf-parse already got enough real text → skip OCR". That rule was the
+  // 2026-10-13 root cause: this Telugu worksheet's text layer has ~1100 chars of
+  // mis-shaped headers while every question lives in pasted screenshots, so
+  // OCR never ran and the questions were lost. Now each page is OCR'd (bundled
+  // Telugu data, no network) and Groq gets the questions.
+  test('a real Gemini failure on a Telugu worksheet whose questions are screenshots: pages are OCR\'d and Groq gets the questions', async () => {
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
-    global.fetch = jest.fn().mockRejectedValue(new Error('should not be called'));
-    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Groq Read This From pdf-parse Text', tasks: [] }) } }] });
+    global.fetch = jest.fn().mockRejectedValue(new Error('no network calls expected'));
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'From OCR', tasks: [] }) } }] });
 
     const res = await request(app)
       .post('/quiz/generate')
       .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
 
     expect(res.status).toBe(200);
-    expect(res.body.quiz.title).toBe('Groq Read This From pdf-parse Text');
-    expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
+    expect(res.body.quiz.title).toBe('From OCR');
+    expect(res.body.quiz.provider).toBe('groq-text');
+    const prompt = mockGroqCreate.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain('పాము పుట్ట');      // only present inside a screenshot
+    expect(prompt).toContain('రాణి సరస్సులో');
     expect(global.fetch).not.toHaveBeenCalled();
-  }, 30000);
+  }, 240000);
 });
 
 describe('POST /quiz/generate — structuredText ground truth (docx table-hallucination fix)', () => {

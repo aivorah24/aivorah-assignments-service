@@ -3673,3 +3673,4 @@ module.exports = router;
 module.exports.normalizeQuizQuestion = normalizeQuizQuestion;
 module.exports.extractWorksheetContent = extractWorksheetContent;
 module.exports.hostEmbeddedImages = hostEmbeddedImages;
+module.exports.docxToPdf = docxToPdf;

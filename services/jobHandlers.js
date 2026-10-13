@@ -17,9 +17,13 @@ registerHandler('worksheet_extract', async (payload) => {
 // the synchronous POST /quiz/generate, so the queued path can never drift
 // from what the synchronous endpoint does.
 registerHandler('quiz_generate', async (payload) => {
-  const { generateQuizFromPdf } = require('./quizVision');
+  const { generateQuizFromDocument } = require('./quizVision');
   const buffer = Buffer.from(payload.fileBase64, 'base64');
-  const quiz = await generateQuizFromPdf(buffer, { grade: payload.grade, subject: payload.subject, school: payload.school, structuredText: payload.structuredText });
+  const quiz = await generateQuizFromDocument({
+    buffer, mime: payload.mimeType || 'application/pdf',
+    grade: payload.grade, subject: payload.subject, school: payload.school,
+    structuredText: payload.structuredText, language: payload.language,
+  });
   return { quiz };
 });
 
