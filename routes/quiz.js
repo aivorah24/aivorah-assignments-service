@@ -21,6 +21,7 @@ const supabase = require('../services/supabase');
 const {
   renderQuizHTML, autoDetectMCQ, normalizeMatchingTasks, normalizeVennQuestions,
   normalizeRiddleTables, normalizeLetterGridTables, normalizeTables, normalizeCharts,
+  TRANSLIT_LANG_CODES,
 } = require('../utils/quizHtmlRenderer');
 const { generateQuizFromImage, generateQuizFromPdf } = require('../services/quizVision');
 const { publishJob } = require('../services/jobQueue');
@@ -44,6 +45,26 @@ async function fetchBranding(school, curriculum) {
     return { schoolLogoUrl: null, curriculumLogoUrl: null };
   }
 }
+
+// GET /quiz/transliterate?text=namaste&lang=hi → { suggestions: ['नमस्ते', …] }
+// Phonetic English → worksheet script for the student quiz IME (and the app's
+// TransliterationInput). Proxies Google Input Tools, which blocks browser CORS.
+// Never errors to the client: an empty list just means "type it yourself".
+router.get('/transliterate', async (req, res) => {
+  const text = String(req.query.text || '').trim().slice(0, 60);
+  const lang = String(req.query.lang || '').trim().toLowerCase();
+  if (!text || !TRANSLIT_LANG_CODES.includes(lang)) return res.json({ suggestions: [] });
+  try {
+    const url = `https://inputtools.google.com/request?text=${encodeURIComponent(text)}&itc=${lang}-t-i0-und&num=5&cp=0&cs=1&ie=utf-8&oe=utf-8&app=aivorah`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    const data = await r.json();
+    const suggestions = data?.[0] === 'SUCCESS' && Array.isArray(data[1]?.[0]?.[1]) ? data[1][0][1].slice(0, 5) : [];
+    res.json({ suggestions });
+  } catch (err) {
+    console.warn('[quiz/transliterate] failed:', err.message);
+    res.json({ suggestions: [] });
+  }
+});
 
 router.post('/render-preview', async (req, res) => {
   try {
