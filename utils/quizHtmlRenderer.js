@@ -557,7 +557,61 @@ function fmtSolution(text, { steps = false, units = false, sentences = false } =
   return s;
 }
 
-function renderQuizHTML(quiz, branding = {}) {
+// Worksheet languages. `re` detects the script; `translit` = Google Input Tools
+// can turn phonetic English into it (served by GET /quiz/transliterate).
+const WORKSHEET_LANGS = [
+  { code: 'te', name: 'Telugu',    re: /[\u0C00-\u0C7F]/, label: 'తె', translit: true },
+  { code: 'hi', name: 'Hindi',     re: /[\u0900-\u097F]/, label: 'हि', translit: true },
+  { code: 'mr', name: 'Marathi',   re: null,               label: 'म',  translit: true },
+  { code: 'sa', name: 'Sanskrit',  re: null,               label: 'सं', translit: true },
+  { code: 'ne', name: 'Nepali',    re: null,               label: 'ने', translit: true },
+  { code: 'ta', name: 'Tamil',     re: /[\u0B80-\u0BFF]/, label: 'த',  translit: true },
+  { code: 'kn', name: 'Kannada',   re: /[\u0C80-\u0CFF]/, label: 'ಕ',  translit: true },
+  { code: 'ml', name: 'Malayalam', re: /[\u0D00-\u0D7F]/, label: 'മ',  translit: true },
+  { code: 'bn', name: 'Bengali',   re: /[\u0980-\u09FF]/, label: 'বা', translit: true },
+  { code: 'gu', name: 'Gujarati',  re: /[\u0A80-\u0AFF]/, label: 'ગુ', translit: true },
+  { code: 'pa', name: 'Punjabi',   re: /[\u0A00-\u0A7F]/, label: 'ਪੰ', translit: true },
+  { code: 'or', name: 'Odia',      re: /[\u0B00-\u0B7F]/, label: 'ଓ',  translit: true },
+  { code: 'ur', name: 'Urdu',      re: null,               label: 'اُ', translit: true },
+  { code: 'ar', name: 'Arabic',    re: /[\u0600-\u06FF]/, label: 'ع',  translit: true },
+  { code: 'zh', name: 'Mandarin',  re: /[\u4E00-\u9FFF]/, label: '中', translit: false },
+  { code: 'ja', name: 'Japanese',  re: /[\u3040-\u30FF]/, label: 'あ', translit: false },
+  { code: 'ko', name: 'Korean',    re: /[\uAC00-\uD7AF]/, label: '한', translit: false },
+  { code: 'ru', name: 'Russian',   re: /[\u0400-\u04FF]/, label: 'Ру', translit: false },
+  { code: 'el', name: 'Greek',     re: /[\u0370-\u03FF]/, label: 'Ελ', translit: false },
+  { code: 'fr', name: 'French',    re: null,               label: 'FR', translit: false },
+  { code: 'es', name: 'Spanish',   re: null,               label: 'ES', translit: false },
+  { code: 'de', name: 'German',    re: null,               label: 'DE', translit: false },
+];
+const TRANSLIT_LANG_CODES = WORKSHEET_LANGS.filter(l => l.translit).map(l => l.code);
+
+function findLang(v) {
+  const k = String(v || '').trim().toLowerCase();
+  if (!k) return null;
+  return WORKSHEET_LANGS.find(l => l.code === k || l.name.toLowerCase() === k) || null;
+}
+
+// The teacher's chosen language (quiz.language) wins; otherwise detect it from
+// the worksheet's own script, then from the subject name. Returns a code or 'en'.
+function resolveQuizLanguage(quiz) {
+  const chosen = findLang(quiz.language);
+  if (chosen) return chosen.code;
+  const text = (quiz.tasks || []).map(t => [
+    t.title, t.passage, t.instructions,
+    ...(t.questions || []).map(q => `${q.question || ''} ${typeof q.answer === 'string' ? q.answer : ''}`),
+  ].filter(Boolean).join(' ')).join(' ');
+  const byScript = WORKSHEET_LANGS.find(l => l.re && l.re.test(text));
+  if (byScript) return byScript.code;
+  const subject = String(quiz.subject || '');
+  const bySubject = WORKSHEET_LANGS.find(l => new RegExp(`\\b${l.name}\\b`, 'i').test(subject));
+  if (bySubject) return bySubject.code;
+  if (/[àâæçéèêëïîôùûüÿœ]/i.test(text) || /fran[çc]ais/i.test(subject)) return 'fr';
+  if (/[ñ¿¡]/i.test(text) || /espa[ñn]ol/i.test(subject)) return 'es';
+  if (/deutsch/i.test(subject)) return 'de';
+  return 'en';
+}
+
+function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '' } = {}) {
   normalizeVennQuestions(quiz);
   normalizeCharts(quiz);
   normalizeRiddleTables(quiz);
@@ -720,19 +774,19 @@ function renderQuizHTML(quiz, branding = {}) {
     return s;
   }
 
-  // Detect non-Latin/non-English scripts for language-specific input support
-  const allText = (quiz.tasks || []).map(t =>
-    `${t.title || ''} ${(t.questions || []).map(q => q.question || '').join(' ')}`
-  ).join(' ');
-  const hasTeluguScript = /[\u0C00-\u0C7F]/.test(allText);
-  const hasDevanagari = /[\u0900-\u097F]/.test(allText);
-  const hasFrenchChars = /[àâæçéèêëïîôùûüÿœÀÂÆÇÉÈÊËÏÎÔÙÛÜŸŒ]/.test(allText);
-  const isFrench = hasFrenchChars || /french|fran[çc]ais/i.test(quiz.subject || '');
-  const detectedLang = hasTeluguScript ? 'te' : hasDevanagari ? 'hi' : isFrench ? 'fr' : 'en';
-  const inputLangAttr = detectedLang !== 'en' ? ` lang="${detectedLang}"` : '';
+  // Worksheet language → input lang/dir, IME and accent palette.
+  const detectedLang = resolveQuizLanguage(quiz);
+  const langInfo = findLang(detectedLang);
+  const translitLang = langInfo && langInfo.translit ? langInfo : null;
+  const isFrench = detectedLang === 'fr';
+  // dir="auto" lets Arabic/Urdu answers type right-to-left; autocomplete/spellcheck
+  // off so the browser doesn't "correct" non-English words.
+  const inputLangAttr = detectedLang !== 'en'
+    ? ` lang="${detectedLang}" dir="auto" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"`
+    : '';
   const htmlLang = detectedLang;
-  const isLanguageWorksheet = hasTeluguScript || hasDevanagari || isFrench ||
-    /telugu|hindi|sanskrit|urdu|tamil|kannada|malayalam|bengali|marathi|gujarati|french|fran[çc]ais|spanish|espa[ñn]ol|german|deutsch/i.test(quiz.subject || '');
+  const isLanguageWorksheet = detectedLang !== 'en' ||
+    /telugu|hindi|sanskrit|urdu|tamil|kannada|malayalam|bengali|marathi|gujarati|punjabi|odia|french|fran[çc]ais|spanish|espa[ñn]ol|german|deutsch|mandarin|chinese|japanese|korean|arabic|russian/i.test(quiz.subject || '');
 
   let tasksHTML = '';
   let qNum = 0;
@@ -1553,7 +1607,7 @@ function renderQuizHTML(quiz, branding = {}) {
   </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, 'Segoe UI', Roboto, 'Noto Sans Telugu', 'Noto Sans Devanagari', Helvetica, Arial, sans-serif; background: #0F0F0F; color: #F0EEEC; line-height: 1.6; }
+    body { font-family: -apple-system, 'Segoe UI', Roboto, 'Noto Sans Telugu', 'Noto Sans Devanagari', 'Noto Sans Tamil', 'Noto Sans Kannada', 'Noto Sans Malayalam', 'Noto Sans Bengali', 'Noto Sans Gujarati', 'Noto Sans Gurmukhi', 'Noto Sans Oriya', 'Noto Naskh Arabic', 'Noto Sans CJK SC', Helvetica, Arial, sans-serif; background: #0F0F0F; color: #F0EEEC; line-height: 1.6; }
 
     /* ── Header — Aivorah Enchanted Forest ── */
     /* Matches the page's own background (#0F0F0F) instead of a lighter gradient box —
@@ -1787,6 +1841,17 @@ function renderQuizHTML(quiz, branding = {}) {
   </div>
 
   <script>
+    // Absolute assignments-service origin baked in at render time — the student
+    // app shows this page in a blob:/srcdoc iframe whose own origin is the
+    // frontend host (it has no /quiz routes), so relative calls never worked.
+    const API_BASE = ${JSON.stringify(String(apiBase || '').replace(/\/+$/, '')).replace(/</g, '\\u003c')} || (function() {
+      try {
+        if (location.protocol === 'http:' || location.protocol === 'https:') return '';
+        if (location.ancestorOrigins && location.ancestorOrigins.length) return location.ancestorOrigins[0];
+        if (document.referrer) return new URL(document.referrer).origin;
+      } catch (e) {}
+      return '';
+    })();
     let sc = 0;
     const tot = ${qNum};
     const done = new Set(); // questions answered CORRECTLY (drives score credit)
@@ -1818,7 +1883,7 @@ function renderQuizHTML(quiz, branding = {}) {
     const STOPWORDS = new Set(['a','an','the','is','was','it','of','in','to','and','or','on','at','for','with','this','that','be','been','were','are','as','by','from']);
     function keywordSet(s) {
       return new Set(
-        String(s).toLowerCase().replace(/[^a-z0-9\\s]/g, ' ').split(/\\s+/)
+        String(s).normalize('NFC').toLowerCase().replace(/[^\\p{L}\\p{M}\\p{N}\\s]/gu, ' ').split(/\\s+/)
           .filter(function(w) { return w.length > 0 && !STOPWORDS.has(w); })
       );
     }
@@ -1889,7 +1954,8 @@ function renderQuizHTML(quiz, branding = {}) {
       const scorePct = Math.round((sc / tot) * 100);
       // Build per-question answer list
       const answersArr = Object.entries(studentAnswers).map(([qId, data]) => ({
-        qId, answer: data.answer, correct: data.correct,
+        // NFC so the same word typed on different keyboards/IMEs is stored identically.
+        qId, answer: typeof data.answer === 'string' ? data.answer.normalize('NFC') : data.answer, correct: data.correct,
         timeSpent: data.timeSpent || 0,
         question: data.question || ''
       }));
@@ -1999,7 +2065,7 @@ function renderQuizHTML(quiz, branding = {}) {
         if (isNaN(v)) { inp.style.borderColor = '#C5BD96'; return; }
         ok = a.range ? (v >= a.range[0] && v <= a.range[1]) : Math.abs(v - a.answer) < 0.01;
       } else {
-        ok = val.replace(/\\s+/g,'').toLowerCase() === String(a.answer).replace(/\\s+/g,'').toLowerCase();
+        ok = val.normalize('NFC').replace(/\\s+/g,'').toLowerCase() === String(a.answer).normalize('NFC').replace(/\\s+/g,'').toLowerCase();
       }
       // Track student answer + time
       const elapsed = questionStartTimes[id] ? Math.round((Date.now() - questionStartTimes[id]) / 1000) : 0;
@@ -2186,7 +2252,7 @@ function renderQuizHTML(quiz, branding = {}) {
       if (!a || !slot) return;
       if (!chip) { if (r) r.innerHTML = '<span style="color:#C5BD96;font-size:12px;">Place a word first</span>'; return; }
       const val = chip.dataset.word;
-      const ok = String(val).replace(/\\s+/g, '').toLowerCase() === String(a.answer).replace(/\\s+/g, '').toLowerCase();
+      const ok = String(val).normalize('NFC').replace(/\\s+/g, '').toLowerCase() === String(a.answer).normalize('NFC').replace(/\\s+/g, '').toLowerCase();
       studentAnswers[id] = { answer: val, correct: ok, timeSpent: 0, question: '' };
       attempted.add(id);
       if (ok) {
@@ -2228,7 +2294,7 @@ function renderQuizHTML(quiz, branding = {}) {
       }
       function normItems(s) {
         return String(s || '').replace(/\\band\\b/gi, ',').split(/[,;\\n]/)
-          .map(function(x){ return x.trim().toLowerCase(); }).filter(Boolean).sort();
+          .map(function(x){ return x.normalize('NFC').trim().toLowerCase(); }).filter(Boolean).sort();
       }
       // Near-match, not exact-set-equality: a long "multiples of N" list (12-15 items)
       // where the student gets all-but-one right shouldn't fail the whole region red —
@@ -2285,7 +2351,7 @@ function renderQuizHTML(quiz, branding = {}) {
         var v = parseFloat(val);
         ok = !isNaN(v) && (a.range ? (v >= a.range[0] && v <= a.range[1]) : Math.abs(v - a.answer) < 0.01);
       } else {
-        ok = val.replace(/\\s+/g, '').toLowerCase() === String(a.answer).replace(/\\s+/g, '').toLowerCase();
+        ok = val.normalize('NFC').replace(/\\s+/g, '').toLowerCase() === String(a.answer).normalize('NFC').replace(/\\s+/g, '').toLowerCase();
       }
       inp.style.borderColor = ok ? '#4a9d6e' : '#c9605f';
       inp.style.background = ok ? 'rgba(74,157,110,0.14)' : 'rgba(201,96,95,0.10)';
@@ -2312,30 +2378,19 @@ function renderQuizHTML(quiz, branding = {}) {
     // ── Indic language input support ──
     // Students type English phonetically (e.g. "muggulu") → auto-converts to Telugu/Hindi
     // Uses Google Input Tools REST API for transliteration with dropdown suggestions
-    ${(hasTeluguScript || hasDevanagari) ? `
+    ${translitLang ? `
     (function() {
-      const LANG = '${hasTeluguScript ? 'te' : 'hi'}';
-      const IME = 'transliteration_en_' + LANG;
-      const LANG_LABEL = '${hasTeluguScript ? 'తె' : 'हि'}';
-      const LANG_NAME = '${hasTeluguScript ? 'Telugu' : 'Hindi'}';
+      // Every language the IME can type; the worksheet's own language is the default.
+      const LANGS = ${JSON.stringify(WORKSHEET_LANGS.filter(l => l.translit).map(l => ({ code: l.code, name: l.name, label: l.label }))).replace(/</g, '\\u003c')};
+      let current = LANGS.find(function(l) { return l.code === '${translitLang.code}'; }) || LANGS[0];
       let enabled = true;
+      let composing = false; // a native/web keyboard IME is mid-word — don't touch the value
 
-      // Transliterate via OUR server proxy (direct inputtools.google.com calls
-      // fail CORS inside the student iframe — the dropdown silently never showed).
-      // The student app shows this page in a blob: iframe where RELATIVE urls
-      // cannot resolve — derive the server origin from the embedding page.
-      const API_BASE = (function() {
-        try {
-          if (location.protocol === 'http:' || location.protocol === 'https:') return '';
-          if (location.ancestorOrigins && location.ancestorOrigins.length) return location.ancestorOrigins[0];
-          if (document.referrer) return new URL(document.referrer).origin;
-        } catch (e) {}
-        return '';
-      })();
       async function transliterate(word) {
         if (!word || word.length < 1) return [];
         try {
-          const res = await fetch(API_BASE + '/quiz/transliterate?text=' + encodeURIComponent(word) + '&lang=' + LANG);
+          const res = await fetch(API_BASE + '/quiz/transliterate?text=' + encodeURIComponent(word) + '&lang=' + current.code);
+          if (!res.ok) return [];
           const data = await res.json();
           return (data && data.suggestions) || [];
         } catch(e) { console.warn('Transliteration failed:', e); }
@@ -2353,6 +2408,12 @@ function renderQuizHTML(quiz, branding = {}) {
       let wordStart = 0;
 
       function hideDropdown() { dropdown.style.display = 'none'; dropdown.innerHTML = ''; }
+      // Highlight tracked by data-active — the browser rewrites inline rgba() with
+      // spaces, so matching on the style string never found it (Enter/Space did nothing).
+      function setActive(opt) {
+        dropdown.querySelectorAll('div').forEach(function(d) { d.style.background = 'transparent'; d.removeAttribute('data-active'); });
+        if (opt) { opt.style.background = 'rgba(147,176,172,0.15)'; opt.setAttribute('data-active', '1'); }
+      }
 
       function showDropdown(suggestions, input) {
         if (!suggestions.length) { hideDropdown(); return; }
@@ -2361,11 +2422,8 @@ function renderQuizHTML(quiz, branding = {}) {
           var opt = document.createElement('div');
           opt.textContent = s;
           opt.style.cssText = 'padding:8px 14px;font-size:15px;color:#F0EEEC;cursor:pointer;border-bottom:1px solid rgba(195,220,216,0.08);';
-          if (i === 0) opt.style.background = 'rgba(147,176,172,0.15)';
-          opt.onmouseenter = function() {
-            dropdown.querySelectorAll('div').forEach(function(d) { d.style.background = 'transparent'; });
-            opt.style.background = 'rgba(147,176,172,0.15)';
-          };
+          if (i === 0) setActive(opt);
+          opt.onmouseenter = function() { setActive(opt); };
           opt.onmousedown = function(e) {
             e.preventDefault();
             applySelection(s, input);
@@ -2407,7 +2465,7 @@ function renderQuizHTML(quiz, branding = {}) {
       let debounceTimer = null;
 
       function onInput(e) {
-        if (!enabled) return;
+        if (!enabled || composing || e.isComposing) return;
         var input = e.target;
         activeInput = input;
         currentWord = getCurrentWord(input);
@@ -2426,19 +2484,15 @@ function renderQuizHTML(quiz, branding = {}) {
         if (!enabled) return;
         if (dropdown.style.display === 'none') return;
         var items = dropdown.querySelectorAll('div');
-        var active = dropdown.querySelector('div[style*="rgba(147,176,172,0.15)"]');
+        var active = dropdown.querySelector('div[data-active]');
         var idx = Array.from(items).indexOf(active);
 
         if (e.key === 'ArrowDown') {
           e.preventDefault();
-          items.forEach(function(d) { d.style.background = 'transparent'; });
-          var next = (idx + 1) % items.length;
-          items[next].style.background = 'rgba(147,176,172,0.15)';
+          setActive(items[(idx + 1) % items.length]);
         } else if (e.key === 'ArrowUp') {
           e.preventDefault();
-          items.forEach(function(d) { d.style.background = 'transparent'; });
-          var prev = (idx - 1 + items.length) % items.length;
-          items[prev].style.background = 'rgba(147,176,172,0.15)';
+          setActive(items[(idx - 1 + items.length) % items.length]);
         } else if (e.key === 'Enter' || e.key === ' ') {
           if (active) {
             e.preventDefault();
@@ -2451,25 +2505,53 @@ function renderQuizHTML(quiz, branding = {}) {
 
       // Attach to all quiz inputs
       document.querySelectorAll('.lang-input, .q-input').forEach(function(inp) {
-        inp.setAttribute('lang', LANG);
+        inp.setAttribute('lang', current.code);
+        inp.addEventListener('compositionstart', function() { composing = true; hideDropdown(); });
+        inp.addEventListener('compositionend', function() { composing = false; });
         inp.addEventListener('input', onInput);
         inp.addEventListener('keydown', onKeydown);
         inp.addEventListener('blur', function() { setTimeout(hideDropdown, 200); });
       });
 
-      // Toggle indicator (fixed bottom-left)
+      // Language switcher (fixed bottom-left): pick any IME language, or
+      // "My keyboard" to type directly (English or a device keyboard in any script).
       var indicator = document.createElement('div');
       indicator.id = 'lang-indicator';
-      indicator.innerHTML = '<span class="lang-ind-icon">' + LANG_LABEL + '</span><span class="lang-ind-text">' + LANG_NAME + ' ON</span>';
+      indicator.setAttribute('role', 'button');
+      indicator.setAttribute('aria-haspopup', 'listbox');
+      indicator.innerHTML = '<span class="lang-ind-icon"></span><span class="lang-ind-text"></span>';
       indicator.style.cssText = 'position:fixed;bottom:20px;left:20px;background:#1C1C1C;color:#93B0AC;padding:8px 16px;border-radius:20px;border:1px solid rgba(147,176,172,0.3);z-index:999;display:flex;align-items:center;gap:8px;font-family:inherit;box-shadow:0 2px 12px rgba(0,0,0,0.4);cursor:pointer;user-select:none;transition:all 0.2s;';
-      indicator.onclick = function() {
-        enabled = !enabled;
-        indicator.querySelector('.lang-ind-text').textContent = enabled ? LANG_NAME + ' ON' : 'English';
-        indicator.querySelector('.lang-ind-icon').textContent = enabled ? LANG_LABEL : 'EN';
+      var menu = document.createElement('div');
+      menu.id = 'lang-menu';
+      menu.setAttribute('role', 'listbox');
+      menu.style.cssText = 'position:fixed;bottom:64px;left:20px;background:#1C1C1C;border:1px solid rgba(147,176,172,0.3);border-radius:12px;z-index:1000;display:none;max-height:50vh;overflow:auto;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,0.5);';
+      function paint() {
+        indicator.querySelector('.lang-ind-icon').textContent = enabled ? current.label : 'EN';
+        indicator.querySelector('.lang-ind-text').textContent = enabled ? current.name + ' ON' : 'My keyboard';
         indicator.style.borderColor = enabled ? 'rgba(147,176,172,0.3)' : 'rgba(197,189,150,0.3)';
-        if (!enabled) hideDropdown();
-      };
+        document.querySelectorAll('.lang-input, .q-input').forEach(function(inp) { inp.setAttribute('lang', enabled ? current.code : '${detectedLang}'); });
+      }
+      function choose(code) {
+        if (code === 'off') { enabled = false; }
+        else { enabled = true; current = LANGS.find(function(l) { return l.code === code; }) || current; }
+        menu.style.display = 'none';
+        hideDropdown();
+        paint();
+      }
+      [{ code: 'off', name: 'My keyboard (type directly)', label: 'EN' }].concat(LANGS).forEach(function(l) {
+        var opt = document.createElement('div');
+        opt.setAttribute('role', 'option');
+        opt.dataset.code = l.code;
+        opt.textContent = l.label + '  ' + l.name;
+        opt.style.cssText = 'padding:9px 14px;font-size:14px;color:#F0EEEC;cursor:pointer;border-bottom:1px solid rgba(195,220,216,0.08);';
+        opt.onmousedown = function(e) { e.preventDefault(); choose(l.code); };
+        menu.appendChild(opt);
+      });
+      indicator.onclick = function() { menu.style.display = menu.style.display === 'none' ? 'block' : 'none'; };
+      document.addEventListener('mousedown', function(e) { if (!menu.contains(e.target) && !indicator.contains(e.target)) menu.style.display = 'none'; });
+      document.body.appendChild(menu);
       document.body.appendChild(indicator);
+      paint();
 
       // Style for indicator
       var style = document.createElement('style');
@@ -2617,6 +2699,7 @@ function autoDetectMCQ(quiz) {
 }
 
 module.exports = {
+  resolveQuizLanguage, WORKSHEET_LANGS, TRANSLIT_LANG_CODES,
   renderQuizHTML, solveVerticalMath, normalizeVennQuestions, renderBarChart, stripImagesForStructuredTasks,
   autoDetectMCQ, normalizeMatchingTasks, normalizeRiddleTables, normalizeLetterGridTables, normalizeTables, normalizeCharts,
 };
