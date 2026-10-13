@@ -565,6 +565,8 @@ function renderQuizHTML(quiz, branding = {}) {
   normalizeTables(quiz);
   normalizeMatchingTasks(quiz);
   stripImagesForStructuredTasks(quiz);
+  // AI-written image descriptions go inside alt="..." — a stray quote broke the <img> tag.
+  const escAttr = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   // Helper: convert relative image URL to base64 data URI so HTML works standalone
   const serverRoot = path.resolve(__dirname, '..');
   function embedImage(relUrl) {
@@ -995,7 +997,7 @@ function renderQuizHTML(quiz, branding = {}) {
     const cardImgs = matchQs.map(q => q.imageUrl).filter(Boolean);
     const allSameImage = cardImgs.length === matchQs.length && cardImgs.length >= 2 && new Set(cardImgs).size === 1;
     if (allSameImage) {
-      h += `<div class="match-shared-ref" style="text-align:center;margin:0 0 14px;"><img src="${embedImage(cardImgs[0])}" alt="Pictures to match" style="max-width:220px;max-height:360px;border-radius:8px;border:1px solid rgba(195,220,216,0.2);background:#fff;padding:8px;"><div style="font-size:12px;color:#A8B5B3;margin-top:4px;">Match each word to the correct picture above.</div></div>`;
+      h += `<div class="match-shared-ref" style="text-align:center;margin:0 0 14px;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(cardImgs[0])}" alt="Pictures to match" style="max-height:360px;"><div style="font-size:12px;color:#A8B5B3;margin-top:4px;">Match each word to the correct picture above.</div></div>`;
     }
 
     h += `<div class="match-grid">`;
@@ -1004,7 +1006,7 @@ function renderQuizHTML(quiz, branding = {}) {
       h += `<div class="match-card" id="${qId}-card">`;
       if (q.id) h += `<div class="match-card-label">${esc(q.id)})</div>`;
       if (q.imageUrl && !allSameImage) {
-        h += `<div class="match-img"><img src="${embedImage(q.imageUrl)}" alt="${esc(q.diagramDescription || 'Picture to match')}"></div>`;
+        h += `<div class="match-img"><img src="${embedImage(q.imageUrl)}" alt="${esc(q.diagramDescription || 'Picture to match')}" onerror="wkImgError(this)"></div>`;
       } else {
         // No cropped picture (or the only image is the shared strip shown above) —
         // fall back to the question text as the thing to match.
@@ -1082,7 +1084,7 @@ function renderQuizHTML(quiz, branding = {}) {
       html += `<span style="font-size:14px;color:#F0EEEC;"><strong style="color:#C3DCD8">${qLabel}</strong> ${fmtQuestion(questionText)}</span>`;
 
       if (q.imageUrl && !q._sharedImage) {
-        html += `<div class="q-image" style="margin:4px 0 8px;align-self:center;"><img src="${embedImage(q.imageUrl)}" alt="${q.diagramDescription || 'Diagram'}" style="max-width:240px;max-height:200px;border-radius:6px;border:1px solid rgba(195,220,216,0.2);background:#fff;padding:6px;"></div>`;
+        html += `<div class="q-image" style="margin:4px 0 8px;align-self:center;max-width:100%;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(q.imageUrl)}" alt="${escAttr(q.diagramDescription || 'Diagram')}" style="max-height:240px;"></div>`;
       }
 
       html += `<div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap;">`;
@@ -1123,7 +1125,7 @@ function renderQuizHTML(quiz, branding = {}) {
       // image even though it was correctly attached to the question data. The
       // math/science branch below already does this; language worksheets need it too.
       if (q.imageUrl && !q._sharedImage) {
-        html += `<div class="q-image" style="margin:6px 0 10px 38px;text-align:left"><img src="${embedImage(q.imageUrl)}" alt="${q.diagramDescription || 'Worksheet picture'}" style="max-width:200px;border-radius:8px;border:1px solid rgba(195,220,216,0.2);background:#fff;padding:6px;"></div>`;
+        html += `<div class="q-image q-image-indent" style="margin:6px 0 10px 38px;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(q.imageUrl)}" alt="${escAttr(q.diagramDescription || 'Worksheet picture')}" style="max-height:280px;margin:0;"></div>`;
       }
 
       if (q.example) {
@@ -1197,7 +1199,7 @@ function renderQuizHTML(quiz, branding = {}) {
       }
 
       if (q.imageUrl && !q._sharedImage) {
-        html += `<div class="q-image" style="margin:0 0 14px;text-align:center"><img src="${embedImage(q.imageUrl)}" alt="${q.diagramDescription || 'Worksheet diagram'}" style="max-width:320px;border-radius:8px;border:1px solid rgba(195,220,216,0.2);background:#fff;padding:8px;"></div>`;
+        html += `<div class="q-image" style="margin:0 0 14px;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(q.imageUrl)}" alt="${escAttr(q.diagramDescription || 'Worksheet diagram')}"></div>`;
       }
 
       if (isActivity) {
@@ -1334,7 +1336,7 @@ function renderQuizHTML(quiz, branding = {}) {
       tasksHTML += renderDiagramCard({
         instructions: 'Write your answers directly on the diagram below, then tap each check mark.',
         innerHtml: `<div class="diagram-fill-wrap" style="position:relative;display:inline-block;max-width:100%;background:#fff;border-radius:8px;border:1px solid rgba(195,220,216,0.2);padding:10px;">
-          <img src="${embedImage(task.diagramFillImageUrl)}" alt="${task.sharedImageDescription || 'Worksheet diagram'}" style="display:block;max-width:100%;height:auto;border-radius:4px;">
+          <img src="${embedImage(task.diagramFillImageUrl)}" alt="${escAttr(task.sharedImageDescription || 'Worksheet diagram')}" style="display:block;max-width:100%;height:auto;border-radius:4px;" onerror="wkImgError(this)">
           ${inputsHtml}
         </div>`
       });
@@ -1347,7 +1349,9 @@ function renderQuizHTML(quiz, branding = {}) {
       // not just this one — if no crop was extracted, fall through to the text-description path.
       const sharedUrl = questions[0] && questions[0].imageUrl;
       if (sharedUrl) {
-        tasksHTML += `<div style="text-align:center;margin:0 0 16px;"><img src="${embedImage(sharedUrl)}" alt="${task.sharedImageDescription || 'Worksheet diagram'}" style="max-width:320px;max-height:300px;border-radius:8px;border:1px solid rgba(195,220,216,0.2);background:#fff;padding:8px;"></div>`;
+        // Shown once for the task — don't repeat it on every question that carries the same URL.
+        questions.forEach(q => { if (q.imageUrl === sharedUrl) q._sharedImage = true; });
+        tasksHTML += `<div style="margin:0 0 16px;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(sharedUrl)}" alt="${escAttr(task.sharedImageDescription || 'Worksheet diagram')}" style="max-height:360px;"></div>`;
       } else if (task.sharedImageDescription) {
         // Fallback: render branching/tree diagrams as HTML when image extraction missed them
         const desc = task.sharedImageDescription || '';
@@ -1538,6 +1542,15 @@ function renderQuizHTML(quiz, branding = {}) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${quiz.title || 'Quiz'} - Aivorah</title>
+  <script>
+    // A picture that can't load (expired/legacy URL) shows a note, not a broken-image icon.
+    function wkImgError(img) {
+      var note = document.createElement('div');
+      note.className = 'wk-img-missing';
+      note.textContent = 'Picture unavailable' + (img.alt ? ': ' + img.alt : '');
+      img.replaceWith(note);
+    }
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, 'Segoe UI', Roboto, 'Noto Sans Telugu', 'Noto Sans Devanagari', Helvetica, Arial, sans-serif; background: #0F0F0F; color: #F0EEEC; line-height: 1.6; }
@@ -1682,7 +1695,12 @@ function renderQuizHTML(quiz, branding = {}) {
       border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:8px; align-items:center; }
     .match-card-label { align-self:flex-start; font-size:12px; font-weight:700; color:#93B0AC; }
     .match-img { background:#fff; border-radius:8px; padding:6px; width:100%; text-align:center; }
-    .match-img img { max-width:100%; max-height:130px; border-radius:4px; }
+    .match-img img { max-width:100%; height:auto; max-height:130px; object-fit:contain; border-radius:4px; }
+    /* Worksheet pictures: natural size up to the card width, never stretched or cropped. */
+    .wk-img { display:block; box-sizing:border-box; width:auto; height:auto; max-width:100%; max-height:420px;
+      object-fit:contain; margin:0 auto; background:#fff; padding:8px; border-radius:8px; border:1px solid rgba(195,220,216,0.2); }
+    .wk-img-missing { font-size:12px; color:#A8B5B3; padding:8px 12px; border:1px dashed rgba(195,220,216,0.25); border-radius:8px; }
+    @media (max-width: 520px) { .q-image-indent { margin-left:0 !important; } }
     .match-img-text { background:rgba(255,255,255,0.05); color:#F0EEEC; font-size:13px; padding:12px; }
     .match-slot { width:100%; min-height:46px; border:1.5px dashed rgba(195,220,216,0.45); border-radius:10px; display:flex;
       align-items:center; justify-content:center; padding:4px; cursor:pointer; transition:border-color .15s, background .15s; }

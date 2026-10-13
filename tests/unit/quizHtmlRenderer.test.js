@@ -159,4 +159,39 @@ describe('solution formatting and explanation questions', () => {
     const html = render({ type: 'numeric', question: '4 kg = ___ g', answer: '4000' });
     expect(answersOf(html).q1.open).toBeFalsy();
   });
+
+  // 2026-10-13 manual test: IB worksheet pictures were squeezed to fixed
+  // 200-320px boxes (wide diagrams unreadable, overflow on phones), a quote in
+  // the AI description broke the <img> tag, and a dead URL showed a broken icon.
+  describe('worksheet pictures', () => {
+    const quizWith = (q, task = {}) => ({ tasks: [{ title: 'Look and answer', ...task, questions: [{ question: 'What is shown?', answer: 'x', ...q }] }] });
+
+    test('pictures use the responsive wk-img class, not fixed pixel widths', () => {
+      const html = renderQuizHTML(quizWith({ imageUrl: 'https://res.cloudinary.com/demo/w.png' }), {});
+      expect(html).toMatch(/<img class="wk-img" onerror="wkImgError\(this\)" src="https:\/\/res\.cloudinary\.com\/demo\/w\.png"/);
+      const css = html.match(/\.wk-img \{[^}]*\}/)[0];
+      expect(css).toContain('max-width:100%');
+      expect(css).toContain('height:auto');
+      expect(css).toContain('object-fit:contain');
+      expect(html).not.toMatch(/<img[^>]*style="max-width:(200|240|320)px/);
+    });
+
+    test('a quote in the image description cannot break the <img> tag', () => {
+      const html = renderQuizHTML(quizWith({ imageUrl: 'https://x.test/a.png', diagramDescription: 'A "big" cat' }), {});
+      expect(html).toContain('alt="A &quot;big&quot; cat"');
+    });
+
+    test('a shared task picture renders once, responsive', () => {
+      const html = renderQuizHTML(quizWith({ imageUrl: 'https://x.test/shared.png' }, { sharedImage: true }), {});
+      expect(html.match(/x\.test\/shared\.png/g)).toHaveLength(1);
+      expect(html).toMatch(/<img class="wk-img"[^>]*shared\.png/);
+    });
+
+    test('a picture that fails to load is replaced by a note (handler defined in <head>)', () => {
+      const html = renderQuizHTML(quizWith({ imageUrl: '/data/images/quiz/gone.png' }), {});
+      const head = html.slice(0, html.indexOf('</head>'));
+      expect(head).toContain('function wkImgError(img)');
+      expect(head).toContain('Picture unavailable');
+    });
+  });
 });

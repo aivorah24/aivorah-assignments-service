@@ -48,7 +48,113 @@ const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 // (DCTDecode is already a valid JPEG file, no reconstruction needed).
 // Filters this doesn't handle (JPXDecode/JBIG2/CCITTFax - rare in
 // consumer-tool-generated PDFs) are skipped per-image, non-fatally.
-async function extractPdfEmbeddedImages(pdfBuffer, { minDimension = 40 } = {}) {
+//
+// 2026-10-13: pdfjs is now tried first. Image-heavy IB worksheets are often
+// encrypted (permissions-only), keep images inside Form XObjects, or use PNG
+// predictors / SMask alpha / ICC colour — pdf-lib can't walk those (it threw
+// on the page tree, so NO images survived) while pdfjs decodes every one.
+// pdf-lib stays as the fallback if pdfjs itself fails.
+async function extractPdfEmbeddedImages(pdfBuffer, opts = {}) {
+  try {
+    return await extractPdfImagesWithPdfjs(pdfBuffer, opts);
+  } catch {
+    return extractPdfImagesWithPdfLib(pdfBuffer, opts);
+  }
+}
+
+const PDFJS_MAX_IMAGES = 40;
+const PDFJS_MAX_SIDE = 1600; // downscale huge scans so hosted crops stay light
+const FULL_PAGE_AREA = 0.8; // an image covering most of a page is a scan/background, not a diagram
+
+function pdfjsImageToRgba(img, pdfjs) {
+  const { width, height, kind, data } = img;
+  const out = Buffer.alloc(width * height * 4);
+  if (kind === pdfjs.ImageKind.RGBA_32BPP) return Buffer.from(data.buffer, data.byteOffset, width * height * 4);
+  if (kind === pdfjs.ImageKind.RGB_24BPP) {
+    for (let i = 0, j = 0; i < width * height; i++, j += 3) {
+      out[i * 4] = data[j]; out[i * 4 + 1] = data[j + 1]; out[i * 4 + 2] = data[j + 2]; out[i * 4 + 3] = 255;
+    }
+    return out;
+  }
+  if (kind === pdfjs.ImageKind.GRAYSCALE_1BPP) {
+    const rowBytes = (width + 7) >> 3;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const v = (data[y * rowBytes + (x >> 3)] >> (7 - (x & 7))) & 1 ? 255 : 0;
+        const o = (y * width + x) * 4;
+        out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255;
+      }
+    }
+    return out;
+  }
+  return null;
+}
+
+async function extractPdfImagesWithPdfjs(pdfBuffer, { minDimension = 40, maxImages = PDFJS_MAX_IMAGES } = {}) {
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  const { Jimp } = require('jimp');
+  const crypto = require('crypto');
+  let doc;
+  try {
+    doc = await pdfjs.getDocument({
+      data: new Uint8Array(pdfBuffer), isEvalSupported: false, disableFontFace: true, verbosity: 0,
+    }).promise;
+  } catch (err) {
+    if (err && /Invalid PDF|password/i.test(String(err.message || err.name))) return []; // not a PDF - nothing to extract
+    throw err;
+  }
+  const images = [];
+  const seen = new Set();
+  try {
+    for (let p = 1; p <= doc.numPages && images.length < maxImages; p++) {
+      const page = await doc.getPage(p);
+      const [x0, y0, x1, y1] = page.view;
+      const pageArea = Math.abs((x1 - x0) * (y1 - y0)) || 1;
+      const ops = await page.getOperatorList();
+      // Track the CTM so a full-page scan/background can be told apart from a diagram.
+      let ctm = [1, 0, 0, 1, 0, 0];
+      const stack = [];
+      const mul = (m, n) => [
+        m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5],
+      ];
+      for (let i = 0; i < ops.fnArray.length && images.length < maxImages; i++) {
+        const fn = ops.fnArray[i];
+        const args = ops.argsArray[i];
+        if (fn === pdfjs.OPS.save) { stack.push(ctm); continue; }
+        if (fn === pdfjs.OPS.restore) { ctm = stack.pop() || ctm; continue; }
+        if (fn === pdfjs.OPS.transform) { ctm = mul(ctm, args); continue; }
+        if (fn === pdfjs.OPS.paintFormXObjectBegin) { stack.push(ctm); if (Array.isArray(args[0])) ctm = mul(ctm, args[0]); continue; }
+        if (fn === pdfjs.OPS.paintFormXObjectEnd) { ctm = stack.pop() || ctm; continue; }
+        if (fn !== pdfjs.OPS.paintImageXObject && fn !== pdfjs.OPS.paintImageXObjectRepeat) continue;
+        try {
+          const objId = args[0];
+          const store = objId.startsWith('g_') ? page.commonObjs : page.objs;
+          const img = await new Promise((resolve) => store.get(objId, resolve));
+          if (!img || !img.data || img.width < minDimension || img.height < minDimension) continue;
+          const drawnArea = Math.hypot(ctm[0], ctm[1]) * Math.hypot(ctm[2], ctm[3]);
+          if (drawnArea / pageArea > FULL_PAGE_AREA) continue;
+          const rgba = pdfjsImageToRgba(img, pdfjs);
+          if (!rgba) continue;
+          const hash = crypto.createHash('sha1').update(rgba).digest('hex');
+          if (seen.has(hash)) continue; // same logo/picture repeated on every page
+          seen.add(hash);
+          const jimg = new Jimp({ data: rgba, width: img.width, height: img.height });
+          if (Math.max(img.width, img.height) > PDFJS_MAX_SIDE) jimg.scaleToFit({ w: PDFJS_MAX_SIDE, h: PDFJS_MAX_SIDE });
+          const buffer = await jimg.getBuffer('image/png');
+          images.push({ buffer, mime: 'image/png', width: jimg.bitmap.width, height: jimg.bitmap.height, page: p });
+        } catch { /* one bad image must not abort the rest */ }
+      }
+      page.cleanup();
+    }
+  } finally {
+    await doc.destroy().catch(() => {});
+  }
+  return images;
+}
+
+async function extractPdfImagesWithPdfLib(pdfBuffer, { minDimension = 40 } = {}) {
   const { PDFDocument, PDFName } = require('pdf-lib');
   const zlib = require('zlib');
   const images = [];
@@ -58,7 +164,8 @@ async function extractPdfEmbeddedImages(pdfBuffer, { minDimension = 40 } = {}) {
   } catch {
     return images; // not a valid/parseable PDF - nothing to extract, non-fatal
   }
-  const pages = pdfDoc.getPages();
+  let pages;
+  try { pages = pdfDoc.getPages(); } catch { return images; } // broken/encrypted page tree
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
     let xobjects;
     try {
