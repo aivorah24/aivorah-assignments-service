@@ -76,6 +76,7 @@ async function readPdfLayout(pdfBuffer, opts = {}) {
   const { maxPages, minDimension, maxImages, maxSide } = { ...DEFAULTS, ...opts };
   const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   const { Jimp } = require('jimp');
+  const { pngBuffer } = require('./pngImage');
   let doc;
   try {
     doc = await pdfjs.getDocument({
@@ -132,7 +133,7 @@ async function readPdfLayout(pdfBuffer, opts = {}) {
           // Small pictures carry small labels ("5m"): an upscaled copy for OCR.
           let ocrBuffer = buffer;
           const side = Math.max(jimg.bitmap.width, jimg.bitmap.height);
-          if (side < 900) ocrBuffer = await jimg.clone().scale(Math.min(3, 900 / side)).getBuffer('image/png');
+          if (side < 900) ocrBuffer = pngBuffer(jimg.clone().scale(Math.min(3, 900 / side)));
           images.push({
             buffer, ocrBuffer, mime, width: jimg.bitmap.width, height: jimg.bitmap.height, page: p, hash, repeat,
             bbox, areaRatio: (bbox.w * bbox.h) / pageArea,

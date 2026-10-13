@@ -92,27 +92,35 @@ test('no vision provider → Groq structures the OCR transcript (the questions a
   const prompt = mockGroq.mock.calls[0][0].messages[0].content;
   expect(prompt).toContain('రాణి సరస్సులో');
   expect(prompt).toContain('తాత పూలను');
-  expect(prompt).toMatch(/\[IMAGE: url=https:\/\/img\.test\/\d+\.png\]/);
+  expect(prompt).toMatch(/\[IMAGE: url=img:\/\/p\d+-\d+\]/);
   expect(quiz.documentDiagnostics.pages.map(p => p.source)).toEqual(['ocr', 'ocr']);
 }, 180000);
 
-test('a task that needs a picture but got none shows its own region of the page', async () => {
+test('pictures reach their tasks: model ids resolved, region pictures attached, else a page crop', async () => {
   mockGroq.mockResolvedValue(groqReply({
     title: 'MHLE 32', tasks: [
+      { title: 'Task 1: Answer the following.', questions: [
+        { id: 'a', type: 'numeric', question: 'Find the side of this regular polygon if its perimeter is 40 cm.', answer: 5, imageUrl: 'img://p1-2' },
+        { id: 'b', type: 'text', question: 'Ghost picture', answer: 'x', imageUrl: 'img://p9-99' },
+      ] },
       { title: 'Task 2: Find the perimeter of the L shaped polygon.', questions: [
         { id: 'a', type: 'numeric', question: 'Find the perimeter of the L shaped polygon.', answer: 28, solution: '5+6+8+3+...', hasImage: true },
       ] },
       { title: 'Task 3: Application of area and perimeter in real situations.', questions: [
-        { id: 'a', type: 'numeric', question: 'A square playground has sides that are 65 m long. What is the area?', answer: 4225, solution: '65 × 65', hasImage: false },
+        { id: 'a', type: 'numeric', question: 'A square playground has sides that are 65 m long. What is the area?', answer: 4225, solution: '65 × 65', hasImage: true },
+      ] },
+      { title: 'Enrichment Task:', questions: [
+        { id: 'a', type: 'numeric', question: 'A rectangular room has a length of 120 m and a breadth of 80 m. How many 40 cm tiles cover it?', answer: 60000 },
       ] },
     ],
   }));
   const quiz = await generateQuizFromDocument({ buffer: fixture('b05-area-perimeter-worksheet.pdf'), mime: 'application/pdf' });
+  const [t1, t2, t3] = quiz.tasks;
 
-  const t2 = quiz.tasks[0];
-  expect(quiz.regionCrops).toBe(1);
-  expect(t2.regionCrop).toBe(true);
-  expect(t2.sharedImage).toBe(true);
-  expect(t2.questions[0].imageUrl).toMatch(/^https:\/\/img\.test\//);
-  expect(quiz.tasks[1].questions[0].imageUrl).toBeUndefined();
+  expect(t1.questions[0].imageUrl).toBe('https://img.test/2.png');      // id from the model → hosted url
+  expect(t1.questions[1].imageUrl).toBeUndefined();                      // invented id dropped
+  expect(t2.questions[0].imageUrl).toMatch(/^https:\/\/img\.test\//); // L-shape picture found in its region
+  expect(t2.regionCrop).toBeUndefined();
+  expect(t3.regionCrop).toBe(true);                                       // no picture in its region → page crop
+  expect(t3.questions[0].imageUrl).toMatch(/^https:\/\/img\.test\//);
 }, 180000);

@@ -134,12 +134,12 @@ function isDecodableImage(buffer) {
 // Grey + contrast-stretched: lifts faint scans and grey photocopies; clean
 // renders are unaffected. Non-PNG input (a JPEG photo) is passed through.
 async function prepareForOcr(buffer) {
-  const { jimpFromPng, isPng } = require('./pngImage');
+  const { jimpFromPng, pngBuffer, isPng } = require('./pngImage');
   if (!isPng(buffer)) return buffer;
   try {
     const img = jimpFromPng(buffer);
     img.greyscale().normalize();
-    return await img.getBuffer('image/png');
+    return pngBuffer(img);
   } catch {
     return buffer;
   }
@@ -161,12 +161,16 @@ async function detectScript(imageBuffer) {
 }
 
 // Full OCR with line boxes. `langs` like ['tel', 'eng']; `sparse` reads
-// scattered words (labels around pictures) instead of text blocks.
-async function ocrImage(imageBuffer, langs = ['eng'], { sparse = false } = {}) {
+// scattered words (labels around pictures) instead of text blocks; `digits`
+// reads only digits (lone "8"s in stacked fractions are otherwise missed).
+async function ocrImage(imageBuffer, langs = ['eng'], { sparse = false, digits = false } = {}) {
   if (!isDecodableImage(imageBuffer)) throw new Error('OCR: input is not a decodable image');
   return serial(async () => {
     const worker = await getWorker(langs);
-    await worker.setParameters({ tessedit_pageseg_mode: sparse ? '11' : '6' }); // 6 = the library default
+    await worker.setParameters({
+      tessedit_pageseg_mode: sparse ? '11' : '6', // 6 = the library default
+      tessedit_char_whitelist: digits ? '0123456789' : '',
+    });
     const { data } = await worker.recognize(await prepareForOcr(imageBuffer), {}, { text: true, blocks: true });
     const lines = [];
     for (const block of data.blocks || []) {

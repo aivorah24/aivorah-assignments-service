@@ -922,6 +922,29 @@ function findMissingNamedBlocks(quiz, sourceText) {
   return missing;
 }
 
+// Text-only conversions: a number in a question that appears nowhere in the
+// worksheet transcript was guessed (e.g. fractions printed as a picture the
+// OCR couldn't read). Those tasks are flagged for review, never passed off as
+// exact. A vision provider read the page itself, so it isn't second-guessed.
+function flagUnverifiedNumbers(quiz, { visualUnderstandingAvailable, sourceText }) {
+  if (visualUnderstandingAvailable || !sourceText) return quiz;
+  const known = new Set(String(sourceText).match(/\d+(?:\.\d+)?/g) || []);
+  for (const task of quiz.tasks || []) {
+    const missing = new Set();
+    for (const q of task.questions || []) {
+      const texts = [q.question, ...(Array.isArray(q.options) ? q.options.map(o => (o && typeof o === 'object' ? o.text : o)) : [])];
+      const nums = texts.join(' ').match(/\d+(?:\.\d+)?/g) || [];
+      const unknown = [...new Set(nums)].filter(n => !known.has(n));
+      if (unknown.length) {
+        q.unverifiedValues = unknown;
+        unknown.forEach(n => missing.add(n));
+      }
+    }
+    if (missing.size) task.unverifiedValues = [...missing];
+  }
+  return quiz;
+}
+
 function buildConversionReport(quiz, { sourceSectionEstimate, sourceText } = {}) {
   const items = (quiz.tasks || []).map(t => {
     if (!taskHasRealContent(t)) {
@@ -933,6 +956,9 @@ function buildConversionReport(quiz, { sourceSectionEstimate, sourceText } = {})
     }
     if (t.contentGroundingUncertain) {
       return { title: t.title, status: 'REQUIRES_REVIEW', reason: t.contentGroundingNote || CONTENT_GROUNDING_NOTE };
+    }
+    if (Array.isArray(t.unverifiedValues) && t.unverifiedValues.length) {
+      return { title: t.title, status: 'REQUIRES_REVIEW', reason: `Some values (${t.unverifiedValues.slice(0, 8).join(', ')}) were not found in the worksheet's text and may be misread from a picture — check them against the original before publishing.` };
     }
     const interactionIssue = (t.questions || []).map(validateQuestionInteraction).find(Boolean);
     if (interactionIssue) {
@@ -1555,14 +1581,17 @@ async function generateQuizFromDocument({ buffer, mime, grade, subject, school, 
   }
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
+  flagUnverifiedNumbers(result, { visualUnderstandingAvailable, sourceText });
   if (doc) {
-    // Tasks that need a picture but got none show their own region of the page.
-    const { attachRegionCrops } = require('./worksheet/regionCrops');
+    // Tasks without pictures get their region's pictures, or the region itself;
+    // then picture ids become real (or inline) images.
+    const { attachRegionCrops, resolvePictureRefs } = require('./worksheet/regionCrops');
     const { hostPictures } = require('./worksheet/providers');
     result.regionCrops = await attachRegionCrops(result, doc, hostPictures).catch((err) => {
       console.warn('[quiz] region crops failed:', err.message);
       return 0;
     });
+    resolvePictureRefs(result, doc);
   }
   result.extractionStatus = computeExtractionStatus(result);
   const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
@@ -1580,7 +1609,7 @@ module.exports = {
   generateQuizFromImage, generateQuizFromPdf, generateQuizFromDocument, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText, extractPdfEmbeddedImages, hostExtractedImages,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, geminiModel, withTimeout, GEMINI_VISION_TIMEOUT_MS,
   PROVIDER_STATUS, classifyProviderError,
-  enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
+  enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE, flagUnverifiedNumbers,
   computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
   buildConversionReport, taskHasRealContent, validateQuestionInteraction, estimateSourceSectionCount,
   GROQ_OUTPUT_TRUNCATED,

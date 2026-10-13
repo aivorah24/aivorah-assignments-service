@@ -3,7 +3,7 @@
 // local files and prints what each page was read from. Use it to check a
 // worksheet that converts badly before blaming the AI step.
 //   node scripts/worksheetDiagnostics.js <file-or-folder>... [--out <dir>]
-// Pictures are not uploaded; markers show as [IMAGE: url=local://pN-iK].
+// Pictures are not uploaded; markers show their ids ([IMAGE: url=img://pN-K]).
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'http://localhost:0';
 process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || 'diagnostics';
 process.env.GROQ_API_KEY = process.env.GROQ_API_KEY || 'diagnostics';

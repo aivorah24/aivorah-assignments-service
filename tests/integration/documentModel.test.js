@@ -40,7 +40,9 @@ describe('Telugu worksheet with questions pasted as screenshots', () => {
     // The riddle + honeycomb is one screenshot: its text is read AND it stays a picture.
     expect(doc.text).toMatch(/ఆకాశాన అరవై గదులు/);
     expect(doc.pictures.some(p => p.page === 2)).toBe(true);
-    expect(doc.text).toMatch(/--- Page 2 ---[\s\S]*\[IMAGE: url=https:\/\/img\.test\/p2-\d+\.png\]/);
+    expect(doc.text).toMatch(/--- Page 2 ---[\s\S]*\[IMAGE: url=img:\/\/p2-\d+\]/);
+    // ids in the transcript, hosted urls kept alongside for resolution
+    expect(doc.pictures.every(p => /^img:\/\/p\d+-\d+$/.test(p.id) && /^https:\/\/img\.test\//.test(p.url))).toBe(true);
   });
 
   test('page images are available for vision providers', () => {
@@ -62,13 +64,38 @@ describe('English maths worksheet (text layer + pictures)', () => {
   });
 
   test('side-by-side diagrams stay on one row, and labels inside a picture are read', () => {
-    expect(doc.text).toMatch(/\[IMAGE: url=[^\]]+\][^\n]*\|[^\n]*\[IMAGE: url=[^\]]+\]/);
-    expect(doc.text).toMatch(/\[IMAGE: url=[^\]]+\] \(text in picture: [^)]*8m[^)]*\)/);
+    expect(doc.text).toMatch(/\[IMAGE: url=img:[^\]]+\][^\n]*\|[^\n]*\[IMAGE: url=img:[^\]]+\]/);
+    expect(doc.text).toMatch(/\[IMAGE: url=img:[^\]]+\] \(text in picture: [^)]*8m[^)]*\)/);
   });
 
   test('no logo text and no duplicated header lines', () => {
     expect(doc.text).not.toMatch(/SHRI RAM/i);
     expect(doc.text.match(/Name of Learner/g)).toHaveLength(1);
+  });
+});
+
+describe('fractions printed as pictures (MHLE-29: teacher saw invented values)', () => {
+  let doc;
+  beforeAll(async () => {
+    doc = await buildDocumentModel({ buffer: fixture('b06-fractions-measurement-worksheet.pdf'), mime: 'application/pdf', hostImages: fakeHost });
+  }, 180000);
+
+  test('stacked fractions inside the Task 2 pictures are rebuilt exactly', () => {
+    for (const f of ['28/50', '8/24', '30/54', '18/42', '32/48', '36/54', '14/56', '18/28']) expect(doc.text).toContain(f);
+  });
+
+  test('the conversion charts are pictures placed in Task 1', () => {
+    const t1 = doc.text.indexOf('Task 1');
+    const t2 = doc.text.indexOf('Task 2');
+    const between = doc.text.slice(t1, t2);
+    expect((between.match(/\[IMAGE: url=img:/g) || []).length).toBe(2);
+    expect(between).toContain('4 kg=');
+  });
+
+  test('a table drawn as a picture is read cell by cell, keeping its rows', () => {
+    const t4 = doc.text.slice(doc.text.indexOf('Task 4'));
+    expect(t4).toMatch(/\(text in picture: [^)]*\|[^)]*;[^)]*\)/);
+    expect(t4).toContain('1/2 9/9');
   });
 });
 

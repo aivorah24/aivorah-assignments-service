@@ -1,7 +1,13 @@
-// Safety net for visuals the transcript can't carry (vector drawings, grids,
-// shapes drawn with Word's shape tools, charts made of lines): when a task
-// needs a picture but none was attached, show students the task's own region
-// of the worksheet page — from its heading down to the next task's heading.
+// After generation: get every task's pictures onto the student page.
+//   1. A task the model left without a picture gets the document's own
+//      pictures that sit in its region of the page (between its heading and
+//      the next task's heading) — when the task needs one, or the picture
+//      carries printed values (a conversion chart, a table of fractions).
+//   2. A task that needs a picture but has none in its region shows the
+//      region itself, cropped from the page (vector drawings, grids, shapes
+//      drawn with Word's tools).
+//   3. Picture ids from the transcript (img://p1-3) become real URLs — or an
+//      inline image when hosting isn't configured, so nothing goes missing.
 const { tokensOf } = require('./documentModel');
 
 const MIN_REGION_PT = 40;
@@ -12,6 +18,8 @@ function taskNeedsPicture(task) {
   if (qs.some(q => q.imageUrl)) return false;
   return !!task.sharedImage || qs.some(q => q.hasImage || q.visualUnderstandingRequired);
 }
+
+const hasPicture = task => (task.questions || []).some(q => q.imageUrl);
 
 // The text row that best matches a task title (≥60% of its words).
 function findAnchor(title, anchors) {
@@ -26,49 +34,80 @@ function findAnchor(title, anchors) {
   return best;
 }
 
-async function cropRegion(pageImage, pageSize, top, bottom) {
-  const { jimpFromPng } = require('./pngImage');
-  const img = jimpFromPng(pageImage.buffer);
-  const k = img.bitmap.width / pageSize.width;
-  const y = Math.max(0, Math.floor(top * k));
-  const h = Math.min(img.bitmap.height - y, Math.ceil((bottom - top) * k));
-  img.crop({ x: 0, y, w: img.bitmap.width, h });
-  return { buffer: await img.getBuffer('image/png'), mime: 'image/png', page: pageImage.page, width: img.bitmap.width, height: h };
-}
-
-/**
- * Attaches a cropped page region to every task that needs a picture but has
- * none. `hostImages` uploads [{buffer,mime,page}] → [{url}].
- * Returns the number of tasks that received a crop.
- */
-async function attachRegionCrops(quiz, doc, hostImages) {
-  if (!doc || !doc.anchors || !doc.pageImages || !doc.pageImages.length) return 0;
-  const tasks = quiz.tasks || [];
-  const located = tasks.map(t => ({ task: t, anchor: findAnchor(t.title, doc.anchors) }));
-  const jobs = [];
-  for (const { task, anchor } of located) {
-    if (!anchor || !taskNeedsPicture(task)) continue;
-    const size = doc.pageSizes.find(s => s.page === anchor.page);
-    const pageImage = doc.pageImages.find(p => p.page === anchor.page);
-    if (!size || !size.width || !pageImage) continue;
-    // Region ends at the next task heading on the same page, else above the footer.
+// Each located task's region: from below its heading to the next task heading
+// on that page (or above the footer).
+function taskRegions(quiz, doc) {
+  const located = (quiz.tasks || []).map(t => ({ task: t, anchor: findAnchor(t.title, doc.anchors || []) }));
+  return located.filter(l => l.anchor).map(({ task, anchor }) => {
+    const size = (doc.pageSizes || []).find(s => s.page === anchor.page) || { width: 0, height: 0 };
     const nextTop = located
       .filter(o => o.anchor && o.anchor.page === anchor.page && o.anchor.y > anchor.y + 1)
       .map(o => o.anchor.y)
       .sort((a, b) => a - b)[0];
     const top = anchor.y + anchor.h + 2;
-    const bottom = Math.min(nextTop ? nextTop - 4 : size.height * 0.95, size.height);
-    if (bottom - top < MIN_REGION_PT || (bottom - top) / size.height > MAX_REGION_RATIO) continue;
-    jobs.push({ task, pageImage, size, top, bottom });
+    const bottom = Math.min(nextTop ? nextTop - 4 : size.height * 0.95, size.height || Infinity);
+    return { task, page: anchor.page, top, bottom, size };
+  });
+}
+
+function attachRegionPictures(quiz, doc) {
+  let attached = 0;
+  for (const r of taskRegions(quiz, doc)) {
+    if (hasPicture(r.task) || !(r.task.questions || []).length) continue;
+    const inRegion = (doc.pictures || []).filter(p => p.page === r.page
+      && p.bbox.y + p.bbox.h / 2 >= r.top && p.bbox.y + p.bbox.h / 2 <= r.bottom)
+      .sort((a, b) => a.bbox.y - b.bbox.y || a.bbox.x - b.bbox.x);
+    const useful = inRegion.filter(p => taskNeedsPicture(r.task) || p.labels);
+    if (!useful.length) continue;
+    const qs = r.task.questions;
+    if (useful.length > 1 && useful.length === qs.length) {
+      useful.forEach((p, i) => { qs[i].imageUrl = p.id; }); // one picture per item (matching)
+    } else {
+      qs[0].imageUrl = useful[0].id;
+      r.task.sharedImage = true;
+    }
+    attached++;
+  }
+  return attached;
+}
+
+async function cropRegion(pageImage, pageSize, top, bottom) {
+  const { jimpFromPng, pngBuffer } = require('./pngImage');
+  const img = jimpFromPng(pageImage.buffer);
+  const k = img.bitmap.width / pageSize.width;
+  const y = Math.max(0, Math.floor(top * k));
+  const h = Math.min(img.bitmap.height - y, Math.ceil((bottom - top) * k));
+  img.crop({ x: 0, y, w: img.bitmap.width, h });
+  return { buffer: pngBuffer(img), mime: 'image/png', page: pageImage.page, width: img.bitmap.width, height: h };
+}
+
+const dataUri = p => `data:${p.mime || 'image/png'};base64,${p.buffer.toString('base64')}`;
+
+/**
+ * Attaches region pictures, then region crops. `hostImages` uploads
+ * [{buffer,mime,page}] → [{url}] (empty objects when hosting is unavailable).
+ * Returns the number of tasks that received a crop.
+ */
+async function attachRegionCrops(quiz, doc, hostImages) {
+  if (!doc || !doc.anchors) return 0;
+  attachRegionPictures(quiz, doc);
+  if (!doc.pageImages || !doc.pageImages.length) return 0;
+  const jobs = [];
+  for (const r of taskRegions(quiz, doc)) {
+    if (!taskNeedsPicture(r.task) || !r.size.width) continue;
+    const pageImage = doc.pageImages.find(p => p.page === r.page);
+    if (!pageImage) continue;
+    if (r.bottom - r.top < MIN_REGION_PT || (r.bottom - r.top) / r.size.height > MAX_REGION_RATIO) continue;
+    jobs.push(r);
   }
   if (!jobs.length) return 0;
   const crops = [];
-  for (const j of jobs) crops.push(await cropRegion(j.pageImage, j.size, j.top, j.bottom));
+  for (const j of jobs) crops.push(await cropRegion(doc.pageImages.find(p => p.page === j.page), j.size, j.top, j.bottom));
   const hosted = await hostImages(crops);
   let attached = 0;
   jobs.forEach((j, i) => {
-    const url = hosted[i] && hosted[i].url;
-    if (!url || !(j.task.questions || []).length) return;
+    const url = (hosted[i] && hosted[i].url) || dataUri(crops[i]);
+    if (!(j.task.questions || []).length) return;
     j.task.questions[0].imageUrl = url;
     j.task.sharedImage = true;
     j.task.regionCrop = true;
@@ -77,4 +116,20 @@ async function attachRegionCrops(quiz, doc, hostImages) {
   return attached;
 }
 
-module.exports = { attachRegionCrops, findAnchor, taskNeedsPicture };
+// img://… ids → hosted url, or the picture inline when it wasn't hosted.
+// Unknown ids (a model inventing one) are dropped.
+function resolvePictureRefs(quiz, doc) {
+  const byId = new Map(((doc && doc.pictures) || []).map(p => [p.id, p]));
+  for (const task of quiz.tasks || []) {
+    for (const q of task.questions || []) {
+      const ref = q.imageUrl;
+      if (typeof ref !== 'string' || !ref.startsWith('img://')) continue;
+      const pic = byId.get(ref);
+      if (pic) q.imageUrl = pic.url || dataUri(pic);
+      else delete q.imageUrl;
+    }
+  }
+  return quiz;
+}
+
+module.exports = { attachRegionCrops, attachRegionPictures, resolvePictureRefs, findAnchor, taskNeedsPicture };

@@ -10,7 +10,7 @@ const { registerHandler } = require('./jobQueue');
 // /assignments/extract-questions endpoint.
 registerHandler('worksheet_extract', async (payload) => {
   const { extractWorksheetContent } = require('../routes/assignments');
-  return extractWorksheetContent(payload.fileList);
+  return extractWorksheetContent(payload.fileList, { fileName: payload.fileName });
 });
 
 // Real quiz-generation job — reuses the exact same Gemini-vision function as

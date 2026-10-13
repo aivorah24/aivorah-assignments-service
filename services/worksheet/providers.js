@@ -105,7 +105,7 @@ WORKSHEET TRANSCRIPT — machine-read from the uploaded document (PDF text layer
 - [IMAGE: url=...] is a REAL picture cut out of the document at exactly that position. "(text in picture: ...)" lists words/numbers printed inside it — use them (axis values, measurements, labels).
 - ${canSeePages
     ? 'You can ALSO see the page images: use them for layout and for anything the transcript misses, and trust the image over the transcript when OCR spelling looks wrong.'
-    : 'You cannot see the pages: this transcript is your only source. OCR can misspell a few words in non-Latin scripts — keep the worksheet\'s wording, fixing only obvious OCR slips.'}
+    : 'You cannot see the pages: this transcript is your only source. OCR can misspell a few words in non-Latin scripts — keep the worksheet\'s wording, fixing only obvious OCR slips. NEVER invent a number, fraction or word that is not in the transcript: if a value the student needs is missing or unreadable, write "?" in its place so the teacher can fill it in.'}
 
 PICTURES: put a picture on the question it belongs to by copying its exact url into that question's "imageUrl" (never on the task). If one picture serves the whole task (a chart, a passage illustration), put it on the FIRST question of the task and set "sharedImage": true on the task. In matching tasks ("match the picture to the word"), each row "[IMAGE: url=A] | word" is one item: the question gets imageUrl A, and the options are all the words of that task. Skip purely decorative clip-art (borders, holly, snowmen) that no question refers to. Never invent a url and never describe a picture you were only given as a url.
 

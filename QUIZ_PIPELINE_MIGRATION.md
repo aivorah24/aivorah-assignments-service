@@ -119,3 +119,10 @@ present (OCR ≥ 73 conf); scanned book (Dory, 12 pp): every page now has text;
 maths sheets: diagrams inline beside their questions with labels (axis values,
 `5m 8m 3m`). End-to-end AI output can't be measured from the dev sandbox (no
 provider keys/network) — verify with real keys after deploy.
+
+### 2026-10-13 follow-up — MHLE-29 feedback and upload auto-fill
+
+- **Invented values in picture tasks (Task 2 fractions, Task 4 table).** Stacked fractions inside pictures are rebuilt from OCR word positions (`pairFractions`); a table drawn as a picture is read cell by cell (`findGridCells`). Without a vision provider the text model may not invent numbers: a value missing from the transcript must be written "?", and any number in a question that the transcript doesn't contain is flagged (`flagUnverifiedNumbers`) → `REQUIRES_REVIEW` in the conversion report.
+- **Missing pictures in the preview.** Pictures are referenced by id (`img://p1-3`) and resolved after generation to the hosted URL, or inline (data URI) when Cloudinary isn't configured; a task left without a picture gets the pictures printed in its own region (`attachRegionPictures`).
+- **Upload form stuck on the teacher's Grade 6 / CBSE, chapter "loading".** The form's only source was the AI extraction job, which returns nothing when Gemini and Qwen are both down; the frontend also never applied the extracted curriculum. New `POST /assignments/detect-meta` reads grade / curriculum / chapter code from the PDF/docx header text and the file name in about a second (`utils/worksheetMeta.js`); extraction now falls back Gemini → Mistral → Qwen → OCR + Groq text, and fills blanks from the same detector.
+- **Test speed.** PNG encoding goes through pngjs with a fixed filter (`pngBuffer`) — Jimp's encoder and pngjs's adaptive filter search were ~10× slower under jest.

@@ -77,9 +77,12 @@ function coveredBy(line, corpus) {
   return hit / toks.length >= 0.6;
 }
 
-function centreInside(l, b) {
-  const cx = l.x + l.w / 2; const cy = l.y + l.h / 2;
-  return cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h;
+// Share of a line's box that lies inside b (a line running across several
+// columns only partly belongs to a picture it passes over).
+function overlapRatio(l, b) {
+  const w = Math.max(0, Math.min(l.x + l.w, b.x + b.w) - Math.max(l.x, b.x));
+  const h = Math.max(0, Math.min(l.y + l.h, b.y + b.h) - Math.max(l.y, b.y));
+  return (w * h) / Math.max(1, l.w * l.h);
 }
 
 // Logo / header strip / thin rule — not worksheet content.
@@ -100,7 +103,7 @@ function textStats(img, ocrLines) {
   let inkArea = 0;
   let longLines = 0;
   for (const l of ocrLines) {
-    if (!centreInside(l, img.bbox) || l.confidence < 55) continue;
+    if (overlapRatio(l, img.bbox) < 0.7 || l.confidence < 55) continue;
     const n = (l.text.match(/\p{L}/gu) || []).length;
     letters += n;
     inkArea += l.w * l.h;
@@ -152,25 +155,113 @@ const MAX_PICTURES_TO_READ = 30;
 
 function labelWords(res) {
   return res.lines.flatMap(l => (l.words || []).filter(w => /[\p{L}\p{N}]/u.test(w.text)
-    && w.confidence >= (INDIC_OR_RTL.test(w.text) ? 30 : 60)).map(w => w.text));
+    && w.confidence >= (INDIC_OR_RTL.test(w.text) ? 30 : 60)));
 }
 
-// Words printed inside a picture. Two passes: as-is, then — for pictures that
-// mix photos with printed words — with the photos masked out, in sparse mode.
-async function readPictureLabels(img, langs) {
-  const { jimpFromPng, isPng, maskPhotos } = require('./pngImage');
-  const src = img.ocrBuffer || img.buffer;
-  const words = labelWords(await ocr.ocrImage(src, langs));
-  if (isPng(src)) {
-    const j = jimpFromPng(src);
-    const masked = maskPhotos(j);
-    if (masked > 0.1 && masked < 0.75) {
-      const extra = labelWords(await ocr.ocrImage(await j.getBuffer('image/png'), langs, { sparse: true }));
-      for (const w of extra) if (!words.includes(w)) words.push(w);
+const boxOf = w => ({ x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1 - w.bbox.x0, h: w.bbox.y1 - w.bbox.y0 });
+
+// Stacked fractions ("28" above "50") are printed as two separate numbers:
+// pair a number with the one directly below it into "28/50". Without this a
+// text-only model sees "28 50 8 24 …" and guesses the fractions.
+function pairFractions(words) {
+  const items = words.map(w => ({ text: w.text, box: boxOf(w) }));
+  const isNum = t => /^\d+$/.test(t);
+  const used = new Set();
+  const out = [];
+  const byTop = items.map((it, i) => i).sort((a, b) => items[a].box.y - items[b].box.y);
+  for (const i of byTop) {
+    if (used.has(i)) continue;
+    const a = items[i];
+    if (isNum(a.text)) {
+      let best = -1; let bestGap = Infinity;
+      items.forEach((b, j) => {
+        if (j === i || used.has(j) || !isNum(b.text)) return;
+        const gap = b.box.y - (a.box.y + a.box.h);
+        const cxA = a.box.x + a.box.w / 2; const cxB = b.box.x + b.box.w / 2;
+        if (b.box.y > a.box.y + a.box.h * 0.5 && gap < a.box.h * 1.6 && Math.abs(cxA - cxB) < Math.max(a.box.w, b.box.w) * 0.8 && gap < bestGap) {
+          best = j; bestGap = gap;
+        }
+      });
+      if (best >= 0) {
+        const b = items[best];
+        used.add(i); used.add(best);
+        out.push({ text: `${a.text}/${b.text}`, box: { x: Math.min(a.box.x, b.box.x), y: a.box.y, w: Math.max(a.box.w, b.box.w), h: b.box.y + b.box.h - a.box.y } });
+        continue;
+      }
     }
+    used.add(i);
+    out.push(a);
   }
-  return words.join(' ').slice(0, 400);
+  return out;
 }
+
+// Reading order: rows by vertical centre, left to right; rows joined with " ; ".
+function readingOrder(tokens) {
+  const rows = [];
+  for (const t of [...tokens].sort((a, b) => (a.box.y + a.box.h / 2) - (b.box.y + b.box.h / 2))) {
+    const cy = t.box.y + t.box.h / 2;
+    const row = rows.find(r => Math.abs(r.cy - cy) < Math.max(r.h, t.box.h) * 0.6);
+    if (row) row.items.push(t); else rows.push({ cy, h: t.box.h, items: [t] });
+  }
+  return rows.map(r => r.items.sort((a, b) => a.box.x - b.box.x).map(t => t.text).join(' ')).join(' ; ');
+}
+
+const overlaps = (a, b) => {
+  const A = boxOf(a); const B = boxOf(b);
+  const w = Math.max(0, Math.min(A.x + A.w, B.x + B.w) - Math.max(A.x, B.x));
+  const h = Math.max(0, Math.min(A.y + A.h, B.y + B.h) - Math.max(A.y, B.y));
+  return w * h > 0.3 * Math.min(A.w * A.h, B.w * B.h);
+};
+
+// All words in one image region (PNG/JPEG), multi-pass: as-is; photos masked
+// out (sparse) for regions mixing photos with printed words; digits only —
+// sparse at 1× then block mode at 2× (finds lone digits like the "8" of a
+// stacked 8/24). A confident number replaces an overlapping non-number guess.
+async function readRegionWords(src, langs) {
+  const { jimpFromPng, isDecodable, maskPhotos, pngBuffer } = require('./pngImage');
+  const words = labelWords(await ocr.ocrImage(src, langs));
+  if (!isDecodable(src)) return words;
+  const isNumber = w => /^\d+$/.test(w.text);
+  const merge = (extra) => {
+    for (const w of extra) {
+      const i = words.findIndex(o => overlaps(o, w));
+      if (i < 0) words.push(w);
+      else if (isNumber(w) && !isNumber(words[i]) && !/\p{L}{2,}/u.test(words[i].text)) words[i] = w;
+    }
+  };
+  const j = jimpFromPng(src);
+  const masked = maskPhotos(j);
+  if (masked > 0.1 && masked < 0.75) merge(labelWords(await ocr.ocrImage(pngBuffer(j), langs, { sparse: true })));
+  merge(labelWords(await ocr.ocrImage(src, ['eng'], { digits: true, sparse: true })));
+  const big = jimpFromPng(src);
+  if (Math.max(big.bitmap.width, big.bitmap.height) <= 1800) {
+    big.scale(2);
+    const res = await ocr.ocrImage(pngBuffer(big), ['eng'], { digits: true });
+    merge(labelWords(res).map(w => ({ ...w, bbox: { x0: w.bbox.x0 / 2, y0: w.bbox.y0 / 2, x1: w.bbox.x1 / 2, y1: w.bbox.y1 / 2 } })));
+  }
+  return words;
+}
+
+// Words printed inside a picture, in reading order with stacked fractions
+// rebuilt. A table drawn as a picture is read cell by cell (grid lines and
+// neighbouring cells confuse OCR) and keeps its rows: "a | b | c ; d | e | f".
+async function readPictureLabels(img, langs) {
+  const { jimpFromPng, isDecodable, findGridCells, pngBuffer } = require('./pngImage');
+  const src = img.ocrBuffer || img.buffer;
+  const cells = isDecodable(src) ? findGridCells(jimpFromPng(src)) : null;
+  if (cells && cells.length <= MAX_TABLE_CELLS) {
+    const rows = new Map();
+    for (const c of cells) {
+      const crop = jimpFromPng(src).crop({ x: c.x + 2, y: c.y + 2, w: Math.max(4, c.w - 4), h: Math.max(4, c.h - 4) });
+      const text = readingOrder(pairFractions(await readRegionWords(pngBuffer(crop), langs)));
+      if (!rows.has(c.row)) rows.set(c.row, []);
+      rows.get(c.row).push(text || '—');
+    }
+    return [...rows.values()].map(r => r.join(' | ')).join(' ; ').slice(0, 800);
+  }
+  return readingOrder(pairFractions(await readRegionWords(src, langs))).slice(0, 500);
+}
+const MAX_TABLE_CELLS = 30;
 
 async function safe(label, fn, fallback) {
   try { return await fn(); } catch (err) {
@@ -243,7 +334,7 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
       x: l.bbox.x0 * k, y: l.bbox.y0 * k, w: (l.bbox.x1 - l.bbox.x0) * k, h: (l.bbox.y1 - l.bbox.y0) * k,
     })).filter(l => l.text && l.confidence >= 35)
       // Text inside logos/header art is branding, not worksheet content.
-      .filter(l => !decorativeImages.some(img => centreInside(l, img.bbox)));
+      .filter(l => !decorativeImages.some(img => overlapRatio(l, img.bbox) >= 0.7));
 
     let source;
     let textItems;
@@ -275,7 +366,7 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     const labelPictures = contentImages.filter((img, k) => decisions[k].kind === 'picture');
     // Labels inside a picture are read from the picture itself (sharper than the
     // page render) and attached to its marker, not left as loose lines.
-    textItems = textItems.filter(t => t.origin !== 'ocr' || !labelPictures.some(img => centreInside(t, img.bbox)));
+    textItems = textItems.filter(t => t.origin !== 'ocr' || !labelPictures.some(img => overlapRatio(t, img.bbox) >= 0.7));
     contentImages.forEach((img, k) => { img.kind = decisions[k].kind; });
     for (const img of pagePictures) pictures.push(img);
     pages.push({ page: lp.page, width: lp.width, height: lp.height, source, assessment, ocrConfidence: ocrResult ? ocrResult.confidence : null, textItems, pagePictures, raster });
@@ -301,14 +392,20 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
   }
 
   // ── Host pictures, then place them inline ─────────────────────────────
+  // The transcript refers to pictures by short ids (img://p1-3): models copy
+  // them reliably, and quizVision resolves them to the hosted url — or to an
+  // inline image when hosting isn't configured — after generation.
   let hosted = [];
   if (pictures.length && hostImages) hosted = await safe('host pictures', () => hostImages(pictures), []);
-  pictures.forEach((img, idx) => { img.url = hosted[idx] && hosted[idx].url ? hosted[idx].url : null; });
+  pictures.forEach((img, idx) => {
+    img.id = `img://p${img.page}-${idx + 1}`;
+    img.url = hosted[idx] && hosted[idx].url ? hosted[idx].url : null;
+  });
 
   const pageTexts = pages.map((p) => {
     const items = [
       ...p.textItems,
-      ...p.pagePictures.map(img => ({ kind: 'image', x: img.bbox.x, y: img.bbox.y, w: img.bbox.w, h: img.bbox.h, text: (img.url ? `[IMAGE: url=${img.url}]` : '[IMAGE]') + (img.labels ? ` (text in picture: ${img.labels})` : '') })),
+      ...p.pagePictures.map(img => ({ kind: 'image', x: img.bbox.x, y: img.bbox.y, w: img.bbox.w, h: img.bbox.h, text: `[IMAGE: url=${img.id}]` + (img.labels ? ` (text in picture: ${img.labels})` : '') })),
     ];
     const rows = composeRows(items);
     return `--- Page ${p.page} ---\n${rows.join('\n')}`;
@@ -338,10 +435,13 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     anchors,
     pageSizes,
     scripts: [...scripts],
-    pictures: pictures.map(p => ({ url: p.url, page: p.page, bbox: p.bbox, width: p.width, height: p.height })),
+    pictures: pictures.map(p => ({
+      id: p.id, url: p.url, page: p.page, bbox: p.bbox, width: p.width, height: p.height,
+      labels: p.labels || '', buffer: p.buffer, mime: p.mime,
+    })),
     pageImages: rasters.map(r => ({ page: r.page, buffer: r.buffer, mime: 'image/png' })),
     diagnostics,
   };
 }
 
-module.exports = { buildDocumentModel, assessTextLayer, cleanLine, composeRows, classifyImage, isTextImage, isDecorative, coveredBy, makeCorpus, tokensOf };
+module.exports = { buildDocumentModel, pairFractions, readingOrder, assessTextLayer, cleanLine, composeRows, classifyImage, isTextImage, isDecorative, coveredBy, makeCorpus, tokensOf };
