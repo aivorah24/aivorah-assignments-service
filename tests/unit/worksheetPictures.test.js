@@ -2,8 +2,8 @@
 // resolution, region pictures, unverified numbers.
 jest.mock('../../services/supabase', () => ({ from: jest.fn() }));
 const { Jimp } = require('jimp');
-const { pairFractions, readingOrder } = require('../../services/worksheet/documentModel');
-const { findGridCells, findFractionBars, estimateSkew, straighten, jimpFromPng, pngBuffer, findPictureRegions } = require('../../services/worksheet/pngImage');
+const { pairFractions, readingOrder, insertBlanks } = require('../../services/worksheet/documentModel');
+const { findGridCells, findFractionBars, estimateSkew, straighten, jimpFromPng, pngBuffer, findPictureRegions, findUnderlines } = require('../../services/worksheet/pngImage');
 const { resolvePictureRefs, attachRegionPictures, dropTextOnlyPictures } = require('../../services/worksheet/regionCrops');
 const { renderQuizHTML } = require('../../utils/quizHtmlRenderer');
 const { flagUnverifiedNumbers, buildConversionReport } = require('../../services/quizVision');
@@ -113,6 +113,39 @@ describe('findPictureRegions (pictures inside a photo)', () => {
     const frames = regions.filter(r => r.frame);
     expect(frames).toHaveLength(1);
     expect(frames[0].y).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('printed blanks (findUnderlines / insertBlanks)', () => {
+  const rect = (img, x0, y0, x1, y1) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) img.setPixelColor(0x000000ff, x, y); };
+  const line = (words, y0 = 100, y1 = 130) => ({ text: words.map(w => w[0]).join(' '), confidence: 80, bbox: { x0: words[0][1], y0, x1: words[words.length - 1][2], y1 },
+    words: words.map(([text, x0, x1, confidence = 90]) => ({ text, confidence, bbox: { x0, y0, x1, y1 } })) });
+
+  test('an empty answer line is found; underlined text and a box edge are not', () => {
+    const img = new Jimp({ width: 600, height: 300, color: 0xffffffff });
+    rect(img, 100, 50, 260, 51); // blank
+    rect(img, 100, 120, 260, 121); rect(img, 105, 100, 250, 115); // underlined word
+    rect(img, 300, 200, 460, 201); rect(img, 300, 170, 301, 201); rect(img, 459, 170, 460, 201); // box bottom
+    expect(findUnderlines(img, { minLen: 30 })).toEqual([{ x0: 100, x1: 260, y: 50 }]);
+  });
+
+  test('a blank goes into the word gap it sits in', () => {
+    const lines = [line([['a)', 10, 30], ['4', 40, 52], ['kg', 60, 85], ['=', 95, 105], ['gm', 260, 290]])];
+    insertBlanks(lines, [{ x0: 120, x1: 240, y: 128 }]);
+    expect(lines[0].text).toBe('a) 4 kg = ____ gm');
+  });
+
+  test('a line OCR read as a dash, or folded into the next word, still becomes one blank', () => {
+    const lines = [line([['e)5l=—', 10, 120, 30], ['ml', 130, 400, 30]])];
+    insertBlanks(lines, [{ x0: 130, x1: 360, y: 128 }]);
+    expect(lines[0].text).toBe('e)5l= ____ ml');
+    expect(lines[0].words.find(w => w.text === 'ml').confidence).toBeGreaterThanOrEqual(60);
+  });
+
+  test('a line under a word is not a blank', () => {
+    const lines = [line([['Read', 10, 80], ['carefully', 90, 200]])];
+    insertBlanks(lines, [{ x0: 90, x1: 200, y: 128 }]);
+    expect(lines[0].text).toBe('Read carefully');
   });
 });
 

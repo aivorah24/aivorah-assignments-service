@@ -386,4 +386,54 @@ function findPictureRegions(img, textBoxes = [], { minArea = 0.01 } = {}) {
   return out.map(b => ({ ...b, w: Math.min(b.w, W0 - b.x), h: Math.min(b.h, H0 - b.y) }));
 }
 
-module.exports = { jimpFromPng, pngBuffer, isPng, isJpeg, isDecodable, maskPhotos, findGridCells, findFractionBars, estimateSkew, straighten, findPictureRegions };
+// Answer lines printed on a page ("4 kg = ______ gm"): long, thin, free
+// horizontal strokes with nothing written on them. OCR drops them. Returns
+// [{x0, x1, y}] in image px; minLen ≈ the width of three letters.
+function findUnderlines(img, { minLen = 30 } = {}) {
+  const { width: W, height: H, data: d } = img.bitmap;
+  const lum = new Uint8Array(W * H);
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < W * H; i++) { lum[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3; hist[lum[i]]++; }
+  let paper = 255;
+  for (let v = 0, n = 0; v < 256; v++) { n += hist[v]; if (n >= W * H / 2) { paper = v; break; } }
+  const cut = Math.min(200, paper * 0.75);
+  const ink = (x, y) => x >= 0 && y >= 0 && x < W && y < H && lum[y * W + x] < cut;
+  const strokes = [];
+  for (let y = 0; y < H; y++) {
+    let x = 0;
+    while (x < W) {
+      if (!ink(x, y)) { x++; continue; }
+      const x0 = x;
+      while (x < W && (ink(x, y) || ink(x + 1, y))) x++; // a 1-px gap in a dotted/soft line
+      const len = x - x0;
+      if (len < 8) continue;
+      const s = strokes.find(t => t.y1 >= y - 1 && Math.min(t.x1, x - 1) - Math.max(t.x0, x0) >= 0.7 * Math.min(len, t.x1 - t.x0));
+      if (s) { s.y1 = y; s.x0 = Math.min(s.x0, x0); s.x1 = Math.max(s.x1, x - 1); } else strokes.push({ x0, x1: x - 1, y0: y, y1: y });
+    }
+  }
+  // Pieces of one rule (a soft photo breaks a long line into dashes) are
+  // joined, so a box edge or a page rule is judged by its full length.
+  strokes.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+  const joined = [];
+  for (const s of strokes) {
+    if (s.y1 - s.y0 > 5) continue;
+    const prev = joined.find(t => Math.abs(t.y0 - s.y0) <= 2 && s.x0 - t.x1 <= 8 && s.x0 >= t.x0);
+    if (prev) { prev.x1 = Math.max(prev.x1, s.x1); prev.y1 = Math.max(prev.y1, s.y1); } else joined.push({ ...s });
+  }
+  const out = [];
+  for (const s of joined) {
+    const len = s.x1 - s.x0 + 1;
+    if (len < minLen || len > W * 0.5) continue;
+    // Empty above (a blank, not underlined text) and no box sides at the ends.
+    let above = 0;
+    for (let y = s.y0 - 3; y >= Math.max(0, s.y0 - Math.round(len * 0.25)); y--) for (let x = s.x0; x <= s.x1; x++) if (ink(x, y)) above++;
+    if (above > len * 0.6) continue;
+    let sides = 0;
+    for (const x of [s.x0, s.x1]) { let n = 0; while (ink(x, s.y0 - n - 1)) n++; let m = 0; while (ink(x, s.y1 + m + 1)) m++; if (n > 8 || m > 8) sides++; }
+    if (sides) continue;
+    out.push({ x0: s.x0, x1: s.x1, y: s.y0 });
+  }
+  return out;
+}
+
+module.exports = { jimpFromPng, pngBuffer, isPng, isJpeg, isDecodable, maskPhotos, findGridCells, findFractionBars, estimateSkew, straighten, findPictureRegions, findUnderlines };

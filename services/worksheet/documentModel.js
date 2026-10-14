@@ -350,6 +350,48 @@ async function readPictureLabels(img, langs) {
 }
 const MAX_TABLE_CELLS = 30;
 
+const isDecodableRaster = r => !!(r && r.buffer && require('./pngImage').isDecodable(r.buffer));
+const medianLineHeight = (lines) => {
+  const hs = lines.map(l => l.bbox.y1 - l.bbox.y0).sort((a, b) => a - b);
+  return hs[Math.floor(hs.length / 2)] || 10;
+};
+
+// Puts the page's printed answer lines back into the OCR lines as "____", at
+// the word gap they sit in ("4 kg = ____ gm"): Tesseract reads the words
+// either side and drops the line.
+function insertBlanks(lines, underlines) {
+  for (const u of underlines) {
+    const line = lines.find((l) => {
+      const h = l.bbox.y1 - l.bbox.y0;
+      return u.y >= l.bbox.y0 + h * 0.4 && u.y <= l.bbox.y1 + h * 0.3
+        && u.x1 >= l.bbox.x0 - h * 4 && u.x0 <= l.bbox.x1 + h * 4;
+    });
+    if (!line || !line.words) continue;
+    // OCR often folds the line into the next word's box ("ml" 270 px wide):
+    // a box far too wide for its text is cut back to the side off the line.
+    const h = line.bbox.y1 - line.bbox.y0;
+    for (const w of line.words) {
+      const wide = (w.bbox.x1 - w.bbox.x0) > w.text.length * h * 0.75 + h;
+      if (!wide || Math.min(w.bbox.x1, u.x1) <= Math.max(w.bbox.x0, u.x0)) continue;
+      if (w.bbox.x1 > u.x1 + h * 0.3) w.bbox = { ...w.bbox, x0: Math.max(w.bbox.x0, u.x1) };
+      else if (w.bbox.x0 < u.x0 - h * 0.3) w.bbox = { ...w.bbox, x1: Math.min(w.bbox.x1, u.x0) };
+      else continue;
+      // Its low confidence came from the line inside its box.
+      w.confidence = Math.max(w.confidence, 60);
+    }
+    // Not under a word (that is underlined text, or the word is written on it).
+    const dash = w => /^[-—–_.]{1,3}$/.test(w.text); // the line itself, misread
+    for (const w of line.words) if (/[^-—–_][-—–_]+$/.test(w.text) && w.bbox.x1 >= u.x0 - h) w.text = w.text.replace(/[-—–_]+$/, '');
+    const under = line.words.some(w => !dash(w) && Math.min(w.bbox.x1, u.x1) - Math.max(w.bbox.x0, u.x0) > (w.bbox.x1 - w.bbox.x0) * 0.5);
+    if (under) continue;
+    const blank = { text: '____', confidence: 99, bbox: { x0: u.x0, x1: u.x1, y0: line.bbox.y0, y1: line.bbox.y1 } };
+    line.words = [...line.words.filter(w => !dash(w)), blank].sort((a, b) => (a.bbox.x0 + a.bbox.x1) - (b.bbox.x0 + b.bbox.x1));
+    line.text = line.words.map(w => w.text).join(' ');
+    line.bbox = { ...line.bbox, x0: Math.min(line.bbox.x0, u.x0), x1: Math.max(line.bbox.x1, u.x1) };
+  }
+  return lines;
+}
+
 // Pictures cut out of a photographed page (see findPictureRegions), in the
 // shape pdfLayout gives embedded images. A frame (table, box round text) is a
 // picture only when it holds stacked fractions — the page OCR reads those as
@@ -445,6 +487,11 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     const needOcr = ocrEnabled && raster && (!assessment.reliable || contentImages.length > 0 || structuredText);
     let ocrResult = null;
     if (needOcr) ocrResult = await safe(`ocr page ${lp.page}`, () => ocr.ocrImage(raster.buffer, langs), null);
+    if (ocrResult && !assessment.reliable && !structuredText && isDecodableRaster(raster)) {
+      const { jimpFromPng, findUnderlines } = require('./pngImage');
+      const minLen = Math.round(Math.max(20, raster.buffer && medianLineHeight(ocrResult.lines) * 2));
+      await safe('blanks', () => insertBlanks(ocrResult.lines, findUnderlines(jimpFromPng(raster.buffer), { minLen })), null);
+    }
     if (lp.photo && ocrResult && lp.width) {
       // A photo has no embedded pictures: cut them out of it.
       lp.images = await safe('photo pictures', () => photoPictures(raster.buffer, ocrResult, lp), []);
@@ -569,4 +616,4 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
   };
 }
 
-module.exports = { buildDocumentModel, pairFractions, readingOrder, assessTextLayer, cleanLine, composeRows, classifyImage, isTextImage, isDecorative, coveredBy, makeCorpus, tokensOf };
+module.exports = { buildDocumentModel, insertBlanks, pairFractions, readingOrder, assessTextLayer, cleanLine, composeRows, classifyImage, isTextImage, isDecorative, coveredBy, makeCorpus, tokensOf };
