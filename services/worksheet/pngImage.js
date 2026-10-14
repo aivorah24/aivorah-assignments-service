@@ -129,11 +129,14 @@ function findGridCells(img, { minCover = 0.6, minCellRatio = 0.08 } = {}) {
 // Returns each bar with the numerator/denominator bands to read, and the boxes.
 function findFractionBars(img) {
   const { width: W, height: H, data: d } = img.bitmap;
-  const ink = (x, y) => {
-    if (x < 0 || y < 0 || x >= W || y >= H) return false;
-    const o = (y * W + x) * 4;
-    return (d[o] + d[o + 1] + d[o + 2]) / 3 < 150;
-  };
+  // Ink relative to the paper: print in a soft phone photo is mid-grey.
+  const lum = new Uint8Array(W * H);
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < W * H; i++) { lum[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3; hist[lum[i]]++; }
+  let paper = 255;
+  for (let v = 0, n = 0; v < 256; v++) { n += hist[v]; if (n >= W * H / 2) { paper = v; break; } }
+  const cut = Math.min(200, paper * 0.78);
+  const ink = (x, y) => x >= 0 && y >= 0 && x < W && y < H && lum[y * W + x] < cut;
   const rowInk = (x0, x1, y) => { let n = 0; for (let x = x0; x <= x1; x++) if (ink(x, y)) n++; return n; };
   // Horizontal runs, stacked into strokes (≤ 4 px thick).
   const minLen = 6; const maxLen = Math.max(minLen + 1, Math.round(W * 0.35));
@@ -147,8 +150,10 @@ function findFractionBars(img) {
       const x1 = x - 1;
       const len = x1 - x0 + 1;
       if (len < minLen || len > maxLen) continue;
-      const s = strokes.find(t => t.y1 >= y - 1 && Math.abs(t.x0 - x0) <= 2 && Math.abs(t.x1 - x1) <= 2);
-      if (s) s.y1 = y; else strokes.push({ x0, x1, y0: y, y1: y });
+      // Rows overlapping the stroke above join it: a soft (photographed)
+      // stroke's rows differ in length at the ends.
+      const s = strokes.find(t => t.y1 >= y - 1 && Math.min(t.x1, x1) - Math.max(t.x0, x0) + 1 >= 0.7 * Math.min(len, t.x1 - t.x0 + 1));
+      if (s) { s.y1 = y; s.x0 = Math.min(s.x0, x0); s.x1 = Math.max(s.x1, x1); } else strokes.push({ x0, x1, y0: y, y1: y });
     }
   }
   // Ink band next to a stroke: skip the gap, then take rows with ink until a
@@ -156,8 +161,12 @@ function findFractionBars(img) {
   const band = (s, dir, reach) => {
     const pad = Math.round((s.x1 - s.x0) * 0.25) + 2;
     const x0 = Math.max(0, s.x0 - pad); const x1 = Math.min(W - 1, s.x1 + pad);
+    // Up to two rows right next to the bar with a pixel or two of ink are its
+    // blur halo (photos), not a digit.
+    const halo = Math.max(2, Math.round((x1 - x0) * 0.08));
     let y = dir < 0 ? s.y0 - 1 : s.y1 + 1;
     let gap = 0;
+    while (gap < 2 && y >= 0 && y < H && rowInk(x0, x1, y) > 0 && rowInk(x0, x1, y) <= halo) { y += dir; gap++; }
     while (y >= 0 && y < H && gap < reach && rowInk(x0, x1, y) === 0) { y += dir; gap++; }
     if (gap >= reach || y < 0 || y >= H) return null;
     const start = y;
@@ -172,8 +181,8 @@ function findFractionBars(img) {
   const vrun = (x, y, dir) => { let n = 0; while (ink(x, y + dir * (n + 1)) || ink(x + 1, y + dir * (n + 1)) || ink(x - 1, y + dir * (n + 1))) n++; return n; };
   const bars = []; const boxes = [];
   for (const s of strokes) {
-    if (s.y1 - s.y0 > 3) continue;
     const len = s.x1 - s.x0 + 1;
+    if (s.y1 - s.y0 > Math.max(4, len * 0.3)) continue;
     const down = Math.min(vrun(s.x0, s.y1, 1), vrun(s.x1, s.y1, 1));
     if (down >= len * 0.6) {
       // A box: the sides close on a bottom edge as long as the top one.
@@ -201,7 +210,11 @@ function findFractionBars(img) {
   // Real fractions share one digit size: drop strokes inside smaller glyphs.
   const heights = bars.map(b => Math.max(b.num.h, b.den.h)).sort((a, b) => a - b);
   const typical = heights[Math.floor(heights.length / 2)] || 0;
-  return { bars: bars.filter(b => Math.min(b.num.h, b.den.h) >= typical * 0.6), boxes };
+  // An answer box is at least as tall as the digits (a loop of an "8" is not).
+  return {
+    bars: bars.filter(b => Math.min(b.num.h, b.den.h) >= typical * 0.6),
+    boxes: boxes.filter(b => b.h >= typical * 0.9 && b.w >= typical * 0.9),
+  };
 }
 
 // Skew of a photographed page, in degrees (rotate by the negative to
@@ -274,4 +287,103 @@ function straighten(buffer) {
   return pngBuffer(canvas);
 }
 
-module.exports = { jimpFromPng, pngBuffer, isPng, isJpeg, isDecodable, maskPhotos, findGridCells, findFractionBars, estimateSkew, straighten };
+// Pictures inside a photographed page (a photo has no embedded images to cut
+// out): ink that is not a line of OCR'd text and not the surface the sheet
+// lies on, grouped into regions. `textBoxes` are the page OCR's text lines
+// ({x, y, w, h} in image px). A region whose ink is only on its border once
+// the text is removed — a frame round text, a table — is marked `frame`.
+// Returns [{x, y, w, h, frame}] in image px.
+function findPictureRegions(img, textBoxes = [], { minArea = 0.01 } = {}) {
+  const { width: W0, height: H0 } = img.bitmap;
+  const k = Math.min(1, 800 / Math.max(W0, H0));
+  const small = img.clone();
+  if (k < 1) small.resize({ w: Math.round(W0 * k), h: Math.round(H0 * k) });
+  const { width: W, height: H, data: d } = small.bitmap;
+  const ink = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    const r = d[i * 4]; const g = d[i * 4 + 1]; const b = d[i * 4 + 2];
+    if ((r + g + b) / 3 < 150 || Math.max(r, g, b) - Math.min(r, g, b) > 60) ink[i] = 1;
+  }
+  // The surface around the sheet: mostly-dark blocks connected to the edge.
+  const B = 8; const bw = Math.ceil(W / B); const bh = Math.ceil(H / B);
+  const dark = new Uint8Array(bw * bh);
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      let n = 0; let all = 0;
+      for (let y = by * B; y < Math.min(H, by * B + B); y++) for (let x = bx * B; x < Math.min(W, bx * B + B); x++) { all++; n += ink[y * W + x]; }
+      dark[by * bw + bx] = n / all > 0.6 ? 1 : 0;
+    }
+  }
+  const bg = new Uint8Array(bw * bh);
+  const stack = [];
+  for (let bx = 0; bx < bw; bx++) { stack.push(bx, (bh - 1) * bw + bx); }
+  for (let by = 0; by < bh; by++) { stack.push(by * bw, by * bw + bw - 1); }
+  while (stack.length) {
+    const i = stack.pop();
+    if (bg[i] || !dark[i]) continue;
+    bg[i] = 1;
+    const bx = i % bw; const by = (i - bx) / bw;
+    if (bx > 0) stack.push(i - 1); if (bx < bw - 1) stack.push(i + 1);
+    if (by > 0) stack.push(i - bw); if (by < bh - 1) stack.push(i + bw);
+  }
+  // The sheet's bounds (non-background blocks).
+  let sx0 = W; let sy0 = H; let sx1 = 0; let sy1 = 0;
+  for (let i = 0; i < bw * bh; i++) {
+    if (bg[i]) continue;
+    const bx = i % bw; const by = (i - bx) / bw;
+    sx0 = Math.min(sx0, bx * B); sy0 = Math.min(sy0, by * B); sx1 = Math.max(sx1, bx * B + B); sy1 = Math.max(sy1, by * B + B);
+  }
+  if (sx1 <= sx0 || sy1 <= sy0) return [];
+  const m = 2 * B; // the sheet's own edge shading
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const bi = Math.floor(y / B) * bw + Math.floor(x / B);
+      if (bg[bi] || x < sx0 + m || y < sy0 + m || x >= sx1 - m || y >= sy1 - m) ink[y * W + x] = 0;
+    }
+  }
+  for (const t of textBoxes) {
+    const x0 = Math.max(0, Math.floor(t.x * k) - 1); const y0 = Math.max(0, Math.floor(t.y * k) - 1);
+    const x1 = Math.min(W - 1, Math.ceil((t.x + t.w) * k) + 1); const y1 = Math.min(H - 1, Math.ceil((t.y + t.h) * k) + 1);
+    for (let y = y0; y <= y1; y++) ink.fill(0, y * W + x0, y * W + x1 + 1);
+  }
+  // Group: ink within R px joins a region.
+  const R = 6;
+  const seen = new Int32Array(W * H).fill(-1);
+  const regions = [];
+  for (let i = 0; i < W * H; i++) {
+    if (!ink[i] || seen[i] >= 0) continue;
+    const id = regions.length;
+    const reg = { x0: W, y0: H, x1: 0, y1: 0, n: 0 };
+    const q = [i]; seen[i] = id;
+    while (q.length) {
+      const j = q.pop();
+      const x = j % W; const y = (j - x) / W;
+      reg.n++;
+      if (x < reg.x0) reg.x0 = x; if (x > reg.x1) reg.x1 = x; if (y < reg.y0) reg.y0 = y; if (y > reg.y1) reg.y1 = y;
+      for (let yy = Math.max(0, y - R); yy <= Math.min(H - 1, y + R); yy++) {
+        for (let xx = Math.max(0, x - R); xx <= Math.min(W - 1, x + R); xx++) {
+          const o = yy * W + xx;
+          if (ink[o] && seen[o] < 0) { seen[o] = id; q.push(o); }
+        }
+      }
+    }
+    regions.push(reg);
+  }
+  const sheetArea = (sx1 - sx0) * (sy1 - sy0);
+  const out = [];
+  for (const r of regions) {
+    const w = r.x1 - r.x0 + 1; const h = r.y1 - r.y0 + 1;
+    if (w * h < sheetArea * minArea || w < (sx1 - sx0) * 0.05 || h < (sy1 - sy0) * 0.03) continue;
+    if (w * h > sheetArea * 0.6) continue;
+    // Ink away from the region's border (a frame has none).
+    const ix0 = r.x0 + Math.round(w * 0.1); const ix1 = r.x1 - Math.round(w * 0.1);
+    const iy0 = r.y0 + Math.round(h * 0.1); const iy1 = r.y1 - Math.round(h * 0.1);
+    let inner = 0;
+    for (let y = iy0; y <= iy1; y++) for (let x = ix0; x <= ix1; x++) inner += ink[y * W + x];
+    const frame = inner < Math.max(1, (ix1 - ix0) * (iy1 - iy0)) * 0.01;
+    out.push({ x: Math.max(0, Math.floor(r.x0 / k) - 4), y: Math.max(0, Math.floor(r.y0 / k) - 4), w: Math.min(W0, Math.ceil(w / k) + 8), h: Math.min(H0, Math.ceil(h / k) + 8), frame });
+  }
+  return out.map(b => ({ ...b, w: Math.min(b.w, W0 - b.x), h: Math.min(b.h, H0 - b.y) }));
+}
+
+module.exports = { jimpFromPng, pngBuffer, isPng, isJpeg, isDecodable, maskPhotos, findGridCells, findFractionBars, estimateSkew, straighten, findPictureRegions };

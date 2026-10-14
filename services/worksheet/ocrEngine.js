@@ -199,8 +199,25 @@ async function pickScript(imageBuffer) {
   let sample = imageBuffer;
   if (isDecodable(imageBuffer)) {
     const img = jimpFromPng(imageBuffer);
-    const { width: W, height: H } = img.bitmap;
-    img.crop({ x: 0, y: Math.round(H * 0.2), w: W, h: Math.max(1, Math.round(H * 0.4)) });
+    const { width: W, height: H, data: d } = img.bitmap;
+    // The band with the most text (a short page has its text near the top):
+    // text rows switch light↔dark often; the dark table round a photo doesn't.
+    const rowInk = new Float64Array(H);
+    for (let y = 0; y < H; y++) {
+      let prev = false;
+      for (let x = 0; x < W; x++) {
+        const o = (y * W + x) * 4; const dark = d[o] + d[o + 1] + d[o + 2] < 390;
+        if (dark && !prev) rowInk[y]++;
+        prev = dark;
+      }
+    }
+    const bandH = Math.max(1, Math.round(H * 0.4));
+    let best = 0; let bestY = 0; let sum = 0;
+    for (let y = 0; y < H; y++) {
+      sum += rowInk[y] - (y >= bandH ? rowInk[y - bandH] : 0);
+      if (y >= bandH - 1 && sum > best) { best = sum; bestY = y - bandH + 1; }
+    }
+    img.crop({ x: 0, y: bestY, w: W, h: Math.min(bandH, H - bestY) });
     if (img.bitmap.width > 1000) img.resize({ w: 1000 });
     sample = pngBuffer(img);
   }
@@ -217,7 +234,10 @@ async function pickScript(imageBuffer) {
   const best = () => [...scores.entries()].sort((a, b) => b[1] - a[1])[0];
   if (best()[1] < CONFIDENT) for (const sc of Object.keys(SCRIPT_TO_LANGS)) await score(sc);
   const [script, conf] = best();
-  return conf >= 40 ? script : guess;
+  // Another script must read clearly better than English: on a page with
+  // little text every script scores low and the top one is noise.
+  if (script !== 'Latin' && (conf < 50 || conf < scores.get('Latin') + 10)) return 'Latin';
+  return script;
 }
 
 module.exports = {

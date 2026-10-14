@@ -3,7 +3,7 @@
 jest.mock('../../services/supabase', () => ({ from: jest.fn() }));
 const { Jimp } = require('jimp');
 const { pairFractions, readingOrder } = require('../../services/worksheet/documentModel');
-const { findGridCells, findFractionBars, estimateSkew, straighten, jimpFromPng, pngBuffer } = require('../../services/worksheet/pngImage');
+const { findGridCells, findFractionBars, estimateSkew, straighten, jimpFromPng, pngBuffer, findPictureRegions } = require('../../services/worksheet/pngImage');
 const { resolvePictureRefs, attachRegionPictures, dropTextOnlyPictures } = require('../../services/worksheet/regionCrops');
 const { renderQuizHTML } = require('../../utils/quizHtmlRenderer');
 const { flagUnverifiedNumbers, buildConversionReport } = require('../../services/quizVision');
@@ -84,6 +84,35 @@ describe('estimateSkew / straighten', () => {
     expect(Math.abs(estimateSkew(jimpFromPng(straighten(pngBuffer(tilted)))))).toBeLessThanOrEqual(0.3);
     const level = pngBuffer(page());
     expect(straighten(level)).toBe(level);
+  });
+});
+
+describe('findPictureRegions (pictures inside a photo)', () => {
+  const rect = (img, x0, y0, x1, y1, c = 0x000000ff) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) img.setPixelColor(c, x, y); };
+  // A sheet on a dark table: a text line, a framed text box, and a drawing.
+  const photo = () => {
+    const img = new Jimp({ width: 800, height: 1000, color: 0x202020ff });
+    rect(img, 40, 40, 760, 960, 0xffffffff);
+    rect(img, 100, 100, 600, 112); // text line (OCR box given)
+    rect(img, 100, 200, 700, 201); rect(img, 100, 300, 700, 301); rect(img, 100, 200, 101, 301); rect(img, 699, 200, 700, 301); // frame
+    rect(img, 120, 240, 600, 252); // text inside the frame (OCR box given)
+    for (let i = 0; i < 200; i += 8) rect(img, 200 + i, 500 + i, 205 + i, 505 + i); // a drawing: a diagonal
+    rect(img, 200, 500, 400, 503); rect(img, 200, 500, 203, 700);
+    return img;
+  };
+  const text = [{ x: 98, y: 98, w: 505, h: 17 }, { x: 118, y: 238, w: 485, h: 17 }];
+
+  test('finds the drawing, marks the text box as a frame, and ignores text and the table', () => {
+    const regions = findPictureRegions(photo(), text);
+    const drawing = regions.filter(r => !r.frame);
+    expect(drawing).toHaveLength(1);
+    expect(drawing[0].x).toBeLessThanOrEqual(200);
+    expect(drawing[0].y).toBeLessThanOrEqual(500);
+    expect(drawing[0].x + drawing[0].w).toBeGreaterThanOrEqual(400);
+    expect(drawing[0].y + drawing[0].h).toBeGreaterThanOrEqual(700);
+    const frames = regions.filter(r => r.frame);
+    expect(frames).toHaveLength(1);
+    expect(frames[0].y).toBeLessThanOrEqual(200);
   });
 });
 

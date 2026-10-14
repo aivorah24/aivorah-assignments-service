@@ -244,49 +244,80 @@ async function readRegionWords(src, langs) {
 
 // Reads the number in one band of a stacked fraction (cut out, enlarged and
 // framed in white — Tesseract misses lone digits pressed against an edge).
+// Read at a few contrast cuts: a clean render reads the same every time; a
+// soft photo can flip ("11" ↔ "1"). The answer must have as many digits as
+// the band has separate glyphs, and the readings must agree — otherwise "?"
+// (flagged for the teacher) rather than a guess.
 async function readFractionPart(img, b) {
   const { pngBuffer } = require('./pngImage');
   const { Jimp } = require('jimp');
   const m = 2;
   const x = Math.max(0, b.x - m); const y = Math.max(0, b.y - m);
   const crop = img.clone().crop({ x, y, w: Math.min(img.bitmap.width - x, b.w + 2 * m), h: Math.min(img.bitmap.height - y, b.h + 2 * m) });
+  // Grey photo paper → white, faint print → black, to match the white frame.
+  crop.greyscale().normalize();
   const scale = Math.max(1, Math.min(8, 64 / crop.bitmap.height));
   if (scale > 1) crop.scale(scale);
+  const glyphs = glyphCount(crop, 128);
   const pad = Math.round(crop.bitmap.height * 0.6);
-  const canvas = new Jimp({ width: crop.bitmap.width + 2 * pad, height: crop.bitmap.height + 2 * pad, color: 0xffffffff });
-  canvas.composite(crop, pad, pad);
-  const res = await ocr.ocrImage(pngBuffer(canvas), ['eng'], { digits: true, line: true });
-  const text = res.lines.map(l => l.text).join('').replace(/\s+/g, '');
-  return /^\d{1,4}$/.test(text) ? text : '?';
+  const votes = new Map();
+  for (const cut of [0, 110, 150]) {
+    const c = crop.clone();
+    if (cut) { const d = c.bitmap.data; for (let o = 0; o < d.length; o += 4) d[o] = d[o + 1] = d[o + 2] = d[o] < cut ? 0 : 255; }
+    const canvas = new Jimp({ width: c.bitmap.width + 2 * pad, height: c.bitmap.height + 2 * pad, color: 0xffffffff });
+    canvas.composite(c, pad, pad);
+    const res = await ocr.ocrImage(pngBuffer(canvas), ['eng'], { digits: true, line: true });
+    const text = res.lines.map(l => l.text).join('').replace(/\s+/g, '');
+    if (/^\d{1,4}$/.test(text) && (!glyphs || text.length === glyphs)) votes.set(text, (votes.get(text) || 0) + 1);
+  }
+  const ranked = [...votes.entries()].sort((a, b2) => b2[1] - a[1]);
+  if (!ranked.length || (ranked[1] && ranked[1][1] === ranked[0][1])) return '?';
+  return ranked[0][0];
+}
+
+// Separate glyphs in a (normalised) band: runs of columns with ink.
+function glyphCount(img, cut) {
+  const { width: W, height: H, data: d } = img.bitmap;
+  let runs = 0; let inRun = false;
+  for (let x = 0; x < W; x++) {
+    let n = 0;
+    for (let y = 0; y < H; y++) if (d[(y * W + x) * 4] < cut) n++;
+    const on = n >= Math.max(1, H * 0.04);
+    if (on && !inRun) runs++;
+    inRun = on;
+  }
+  return runs;
 }
 
 // Stacked fractions found by their bars (see findFractionBars): each bar's
 // numerator and denominator read on their own, replacing whatever number
 // words the page OCR made of them; answer boxes become "□".
-async function readFractionTokens(img) {
+async function readFractionTokens(img, { table = false } = {}) {
   const { findFractionBars } = require('./pngImage');
   const { bars, boxes } = findFractionBars(img);
   const tokens = [];
   for (const bar of bars.slice(0, 40)) {
     const num = await readFractionPart(img, bar.num);
     const den = await readFractionPart(img, bar.den);
-    // Both halves must read as numbers; otherwise it is a stroke in a drawing
-    // (or an unreadable fraction, left to the page OCR words).
-    if (num === '?' || den === '?') continue;
+    if (num === '?' && den === '?') continue; // a stroke in a drawing, or unreadable
     const x0 = Math.min(bar.x0, bar.num.x, bar.den.x); const x1 = Math.max(bar.x1, bar.num.x + bar.num.w, bar.den.x + bar.den.w);
     tokens.push({ text: `${num}/${den}`, confidence: 100, bbox: { x0, y0: bar.num.y, x1, y1: bar.den.y + bar.den.h } });
   }
+  // A half-read fraction ("?/11") is kept in a table cell or among fully read
+  // ones; alone it is more likely a stroke in a drawing.
+  const complete = tokens.filter(t => !t.text.includes('?')).length;
+  if (!table && complete < 3) tokens.splice(0, tokens.length, ...tokens.filter(t => !t.text.includes('?')));
   for (const b of tokens.length ? boxes : []) tokens.push({ text: '□', confidence: 100, bbox: { x0: b.x, y0: b.y, x1: b.x + b.w, y1: b.y + b.h } });
   return tokens;
 }
 
 // Page-OCR words plus the fractions read from their bars; number words inside
 // a fraction or a box are dropped (they were guesses at the same digits).
-async function readRegionTokens(src, langs) {
+async function readRegionTokens(src, langs, { table = false } = {}) {
   const { jimpFromPng, isDecodable } = require('./pngImage');
   const words = await readRegionWords(src, langs);
   if (!isDecodable(src)) return words;
-  const fractions = await readFractionTokens(jimpFromPng(src));
+  const fractions = await readFractionTokens(jimpFromPng(src), { table });
   if (!fractions.length) return words;
   const inside = (w, f) => {
     const cx = (w.bbox.x0 + w.bbox.x1) / 2; const cy = (w.bbox.y0 + w.bbox.y1) / 2;
@@ -306,7 +337,7 @@ async function readPictureLabels(img, langs) {
     const rows = new Map();
     for (const c of cells) {
       const crop = jimpFromPng(src).crop({ x: c.x + 2, y: c.y + 2, w: Math.max(4, c.w - 4), h: Math.max(4, c.h - 4) });
-      const text = readingOrder(pairFractions(await readRegionTokens(pngBuffer(crop), langs)));
+      const text = readingOrder(pairFractions(await readRegionTokens(pngBuffer(crop), langs, { table: true })));
       if (!rows.has(c.row)) rows.set(c.row, []);
       rows.get(c.row).push(text || '—');
     }
@@ -318,6 +349,33 @@ async function readPictureLabels(img, langs) {
   return readingOrder(pairFractions(await readRegionTokens(src, langs))).slice(0, 500);
 }
 const MAX_TABLE_CELLS = 30;
+
+// Pictures cut out of a photographed page (see findPictureRegions), in the
+// shape pdfLayout gives embedded images. A frame (table, box round text) is a
+// picture only when it holds stacked fractions — the page OCR reads those as
+// loose digits, the picture reader by their bars.
+async function photoPictures(buffer, ocrResult, page) {
+  const { jimpFromPng, pngBuffer, findPictureRegions, findFractionBars } = require('./pngImage');
+  const img = jimpFromPng(buffer);
+  const textBoxes = ocrResult.lines
+    .filter(l => l.confidence >= 60 && (l.text.match(/\p{L}/gu) || []).length >= 2)
+    .map(l => ({ x: l.bbox.x0, y: l.bbox.y0, w: l.bbox.x1 - l.bbox.x0, h: l.bbox.y1 - l.bbox.y0 }));
+  const regions = findPictureRegions(img, textBoxes).filter(r => !r.frame || findFractionBars(img.clone().crop(r)).bars.length >= 3);
+  // A region inside a kept frame is part of it.
+  const inside = (a, b) => a !== b && a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
+  const kept = regions.filter(r => !regions.some(o => o.frame && inside(r, o)));
+  const pageArea = Math.max(1, page.width * page.height);
+  return kept.slice(0, 20).map((bbox) => {
+    const crop = img.clone().crop(bbox);
+    const out = pngBuffer(crop);
+    const side = Math.max(bbox.w, bbox.h);
+    return {
+      buffer: out, ocrBuffer: side < 900 ? pngBuffer(crop.clone().scale(Math.min(3, 900 / side))) : out, mime: 'image/png',
+      width: bbox.w, height: bbox.h, page: page.page, bbox: { x: bbox.x, y: bbox.y, w: bbox.w, h: bbox.h },
+      areaRatio: (bbox.w * bbox.h) / pageArea,
+    };
+  });
+}
 
 async function safe(label, fn, fallback) {
   try { return await fn(); } catch (err) {
@@ -351,8 +409,10 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     // A phone photo is rarely level: straighten it first (OCR reads tilted
     // lines of Indic script poorly, and the picture crops come out level too).
     const level = await safe('straighten photo', () => require('./pngImage').straighten(buffer), buffer);
-    rasters = [{ page: 1, buffer: level, width: 0, height: 0, scale: 1 }];
-    layout.pages = [{ page: 1, width: 0, height: 0, lines: [], images: [] }];
+    // Photo pixels are the page's coordinates.
+    const { width, height } = await safe('photo size', () => require('./pngImage').jimpFromPng(level).bitmap, { width: 0, height: 0 });
+    rasters = [{ page: 1, buffer: level, width, height, scale: 1 }];
+    layout.pages = [{ page: 1, width, height, lines: [], images: [], photo: true }];
   }
   const pageCount = Math.max(layout.pages.length, rasters.length);
 
@@ -379,12 +439,18 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     const lp = layout.pages[i] || { page: i + 1, width: 0, height: 0, lines: [], images: [] };
     const raster = rasters[i];
     const assessment = assessTextLayer(lp.lines);
-    const contentImages = lp.images.filter(img => !isDecorative(img, lp));
-    const decorativeImages = lp.images.filter(img => isDecorative(img, lp));
+    let contentImages = lp.images.filter(img => !isDecorative(img, lp));
+    let decorativeImages = lp.images.filter(img => isDecorative(img, lp));
     // OCR whenever the text layer can't be trusted or text may hide in pictures.
     const needOcr = ocrEnabled && raster && (!assessment.reliable || contentImages.length > 0 || structuredText);
     let ocrResult = null;
     if (needOcr) ocrResult = await safe(`ocr page ${lp.page}`, () => ocr.ocrImage(raster.buffer, langs), null);
+    if (lp.photo && ocrResult && lp.width) {
+      // A photo has no embedded pictures: cut them out of it.
+      lp.images = await safe('photo pictures', () => photoPictures(raster.buffer, ocrResult, lp), []);
+      contentImages = lp.images.filter(img => !isDecorative(img, lp));
+      decorativeImages = lp.images.filter(img => isDecorative(img, lp));
+    }
 
     // Raster px → layout points (images have no layout: use raster space directly).
     const k = raster && lp.width ? lp.width / raster.width : 1;
