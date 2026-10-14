@@ -164,6 +164,39 @@ describe('solution formatting and explanation questions', () => {
   // 200-320px boxes (wide diagrams unreadable, overflow on phones), a quote in
   // the AI description broke the <img> tag, and a dead URL showed a broken icon.
   describe('worksheet pictures', () => {
+    const conversions = (layout) => ({ tasks: [{ title: 'Task 1: Convert', layout, questions: [
+      { id: 'w1', type: 'numeric', question: '4 kg = ___ gm', answer: '4000', imageUrl: 'https://cdn.test/weight.png' },
+      { id: 'w2', type: 'numeric', question: '3 kg = ___ gm', answer: '3000' },
+      { id: 'c1', type: 'numeric', question: '5 l = ___ ml', answer: '5000', imageUrl: 'https://cdn.test/capacity.png' },
+      { id: 'c2', type: 'numeric', question: '13 l = ___ ml', answer: '13000' },
+    ] }] });
+    const rows = html => html.slice(html.indexOf('<table class="ws-table"')).split('<tr').slice(1);
+
+    test('two column charts share one equal-height row above the paired question rows', () => {
+      const html = renderQuizHTML(conversions({ type: 'two-column', columnGroups: [{ questionIds: ['w1', 'w2'] }, { questionIds: ['c1', 'c2'] }] }), {});
+      const [charts, first, second] = rows(html);
+      expect(charts).toContain('ws-chart-row');
+      expect(charts.indexOf('weight.png')).toBeLessThan(charts.indexOf('capacity.png'));
+      expect((html.match(/weight\.png/g) || []).length).toBe(1);
+      expect(first).toContain('4 kg');
+      expect(first).toContain('5 l');
+      expect(second).toContain('3 kg');
+      expect(second).toContain('13 l');
+    });
+
+    test('a one-list task whose two pictures each open one half is shown as two columns', () => {
+      const [charts, first] = rows(renderQuizHTML(conversions(undefined), {}));
+      expect(charts).toContain('capacity.png');
+      expect(first).toContain('4 kg');
+      expect(first).toContain('5 l');
+    });
+
+    test('a list with pictures elsewhere stays one column', () => {
+      const quiz = conversions(undefined);
+      quiz.tasks[0].questions[3].imageUrl = 'https://cdn.test/other.png';
+      expect(renderQuizHTML(quiz, {})).not.toContain('ws-chart-row');
+    });
+
     const quizWith = (q, task = {}) => ({ tasks: [{ title: 'Look and answer', ...task, questions: [{ question: 'What is shown?', answer: 'x', ...q }] }] });
 
     test('pictures use the responsive wk-img class, not fixed pixel widths', () => {

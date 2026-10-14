@@ -1102,6 +1102,21 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
   }
 
   // ── Helper: render a single question cell (for table or card layout) ──
+  // The two columns of a side-by-side task: the AI's own column groups, or —
+  // when it laid the task out as one list — a list whose only two pictures
+  // each open one half ("Task 1: a)–e) beside the weight chart, a)–e) beside
+  // the capacity chart"). Returns [{questionIds}, {questionIds}] or null.
+  function pairedColumns(layout, questions) {
+    if (layout.type === 'two-column' && layout.columnGroups && layout.columnGroups.length >= 2) return layout.columnGroups;
+    if (layout.type === 'two-column' || questions.length < 4 || questions.length % 2) return null;
+    const pictured = questions.map((q, i) => (q.imageUrl ? i : -1)).filter(i => i >= 0);
+    const half = questions.length / 2;
+    if (pictured.length !== 2 || pictured[0] !== 0 || pictured[1] !== half) return null;
+    if (questions[0].imageUrl === questions[half].imageUrl || questions.some(q => !q.id || q.type === 'mcq' || q.type === 'activity')) return null;
+    if (new Set(questions.map(q => q.id)).size !== questions.length) return null;
+    return [questions.slice(0, half), questions.slice(half)].map(g => ({ questionIds: g.map(q => q.id) }));
+  }
+
   function renderQuestionCell(q, qId, isTableCell = false) {
     // ── VENN DIAGRAM: interactive two-circle diagram with three fillable regions ──
     if (q.type === 'venn') {
@@ -1540,8 +1555,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // questions are covered by the fill-in table above
     } else
     // ── TWO-COLUMN TABLE LAYOUT (matches worksheet) ──
-    if (layout.type === 'two-column' && layout.columnGroups && layout.columnGroups.length >= 2) {
-      const colGroups = layout.columnGroups;
+    if (pairedColumns(layout, questions)) {
+      const colGroups = pairedColumns(layout, questions);
       const questionsById = {};
       for (const q of questions) { questionsById[q.id] = q; }
 
@@ -1556,6 +1571,23 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       const rightQIds = rightQuestions.map(q => registerQuestion(q));
 
       tasksHTML += `<table class="ws-table" style="width:100%;border-collapse:collapse;border:1px solid rgba(195,220,216,0.2);border-radius:8px;overflow:hidden;">`;
+
+      // Each column's chart (on its first question) goes in one row of its own,
+      // both pictures the same height, so the question rows below pair up
+      // a)–a), b)–b) instead of one column starting a chart's height lower.
+      const heads = [leftQuestions[0], rightQuestions[0]].map(q => (q && q.imageUrl && !q._sharedImage ? q : null));
+      if (heads.some(Boolean)) {
+        tasksHTML += `<tr class="ws-chart-row">`;
+        for (const q of heads) {
+          tasksHTML += `<td style="width:50%;vertical-align:middle;text-align:center;border:1px solid rgba(195,220,216,0.15);padding:10px;">`;
+          if (q) {
+            tasksHTML += `<img class="wk-img ws-chart" onerror="wkImgError(this)" src="${embedImage(q.imageUrl)}" alt="${escAttr(q.diagramDescription || 'Diagram')}">`;
+            q._sharedImage = true;
+          }
+          tasksHTML += `</td>`;
+        }
+        tasksHTML += `</tr>`;
+      }
 
       // Question rows
       for (let r = 0; r < maxRows; r++) {
@@ -1770,6 +1802,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     /* Worksheet pictures: natural size up to the card width, never stretched or cropped. */
     .wk-img { display:block; box-sizing:border-box; width:auto; height:auto; max-width:100%; max-height:420px;
       object-fit:contain; margin:0 auto; background:#fff; padding:8px; border-radius:8px; border:1px solid rgba(195,220,216,0.2); }
+    .ws-chart { height:220px; max-height:220px; }
     .wk-img-missing { font-size:12px; color:#A8B5B3; padding:8px 12px; border:1px dashed rgba(195,220,216,0.25); border-radius:8px; }
     @media (max-width: 520px) { .q-image-indent { margin-left:0 !important; } }
     .match-img-text { background:rgba(255,255,255,0.05); color:#F0EEEC; font-size:13px; padding:12px; }
