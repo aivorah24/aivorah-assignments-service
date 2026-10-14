@@ -103,6 +103,7 @@ WORKSHEET TRANSCRIPT — machine-read from the uploaded document (PDF text layer
 - "   |   " separates things printed side by side on one row (table cells, a picture and the word next to it, two columns).
 - "____" is a blank answer space printed on the worksheet.
 - [IMAGE: url=...] is a REAL picture cut out of the document at exactly that position. "(text in picture: ...)" lists words/numbers printed inside it — use them (axis values, measurements, labels).
+- "(text in picture: table, R rows, N filled cells: a | b ; c | d)" is a table read cell by cell ("|" between cells, ";" between rows). When each cell is its own exercise (a comparison "7/11 □ 6/11", a sum to solve), make one question per cell — all N of them, in order. "□" is the answer box the student fills.
 - ${canSeePages
     ? 'You can ALSO see the page images: use them for layout and for anything the transcript misses, and trust the image over the transcript when OCR spelling looks wrong.'
     : 'You cannot see the pages: this transcript is your only source. OCR can misspell a few words in non-Latin scripts — keep the worksheet\'s wording, fixing only obvious OCR slips. NEVER invent a number, fraction or word that is not in the transcript: if a value the student needs is missing or unreadable, write "?" in its place so the teacher can fill it in.'}

@@ -242,6 +242,59 @@ async function readRegionWords(src, langs) {
   return words;
 }
 
+// Reads the number in one band of a stacked fraction (cut out, enlarged and
+// framed in white — Tesseract misses lone digits pressed against an edge).
+async function readFractionPart(img, b) {
+  const { pngBuffer } = require('./pngImage');
+  const { Jimp } = require('jimp');
+  const m = 2;
+  const x = Math.max(0, b.x - m); const y = Math.max(0, b.y - m);
+  const crop = img.clone().crop({ x, y, w: Math.min(img.bitmap.width - x, b.w + 2 * m), h: Math.min(img.bitmap.height - y, b.h + 2 * m) });
+  const scale = Math.max(1, Math.min(8, 64 / crop.bitmap.height));
+  if (scale > 1) crop.scale(scale);
+  const pad = Math.round(crop.bitmap.height * 0.6);
+  const canvas = new Jimp({ width: crop.bitmap.width + 2 * pad, height: crop.bitmap.height + 2 * pad, color: 0xffffffff });
+  canvas.composite(crop, pad, pad);
+  const res = await ocr.ocrImage(pngBuffer(canvas), ['eng'], { digits: true, line: true });
+  const text = res.lines.map(l => l.text).join('').replace(/\s+/g, '');
+  return /^\d{1,4}$/.test(text) ? text : '?';
+}
+
+// Stacked fractions found by their bars (see findFractionBars): each bar's
+// numerator and denominator read on their own, replacing whatever number
+// words the page OCR made of them; answer boxes become "□".
+async function readFractionTokens(img) {
+  const { findFractionBars } = require('./pngImage');
+  const { bars, boxes } = findFractionBars(img);
+  const tokens = [];
+  for (const bar of bars.slice(0, 40)) {
+    const num = await readFractionPart(img, bar.num);
+    const den = await readFractionPart(img, bar.den);
+    // Both halves must read as numbers; otherwise it is a stroke in a drawing
+    // (or an unreadable fraction, left to the page OCR words).
+    if (num === '?' || den === '?') continue;
+    const x0 = Math.min(bar.x0, bar.num.x, bar.den.x); const x1 = Math.max(bar.x1, bar.num.x + bar.num.w, bar.den.x + bar.den.w);
+    tokens.push({ text: `${num}/${den}`, confidence: 100, bbox: { x0, y0: bar.num.y, x1, y1: bar.den.y + bar.den.h } });
+  }
+  for (const b of tokens.length ? boxes : []) tokens.push({ text: '□', confidence: 100, bbox: { x0: b.x, y0: b.y, x1: b.x + b.w, y1: b.y + b.h } });
+  return tokens;
+}
+
+// Page-OCR words plus the fractions read from their bars; number words inside
+// a fraction or a box are dropped (they were guesses at the same digits).
+async function readRegionTokens(src, langs) {
+  const { jimpFromPng, isDecodable } = require('./pngImage');
+  const words = await readRegionWords(src, langs);
+  if (!isDecodable(src)) return words;
+  const fractions = await readFractionTokens(jimpFromPng(src));
+  if (!fractions.length) return words;
+  const inside = (w, f) => {
+    const cx = (w.bbox.x0 + w.bbox.x1) / 2; const cy = (w.bbox.y0 + w.bbox.y1) / 2;
+    return cx >= f.bbox.x0 - 2 && cx <= f.bbox.x1 + 2 && cy >= f.bbox.y0 - 2 && cy <= f.bbox.y1 + 2;
+  };
+  return [...words.filter(w => !(/^[\d/]+$/.test(w.text) || w.text.length <= 2) || !fractions.some(f => inside(w, f))), ...fractions];
+}
+
 // Words printed inside a picture, in reading order with stacked fractions
 // rebuilt. A table drawn as a picture is read cell by cell (grid lines and
 // neighbouring cells confuse OCR) and keeps its rows: "a | b | c ; d | e | f".
@@ -253,13 +306,16 @@ async function readPictureLabels(img, langs) {
     const rows = new Map();
     for (const c of cells) {
       const crop = jimpFromPng(src).crop({ x: c.x + 2, y: c.y + 2, w: Math.max(4, c.w - 4), h: Math.max(4, c.h - 4) });
-      const text = readingOrder(pairFractions(await readRegionWords(pngBuffer(crop), langs)));
+      const text = readingOrder(pairFractions(await readRegionTokens(pngBuffer(crop), langs)));
       if (!rows.has(c.row)) rows.set(c.row, []);
       rows.get(c.row).push(text || '—');
     }
-    return [...rows.values()].map(r => r.join(' | ')).join(' ; ').slice(0, 800);
+    // The count up front: a model otherwise stops a few items short.
+    const filled = [...rows.values()].flat().filter(t => t !== '—').length;
+    const table = [...rows.values()].map(r => r.join(' | ')).join(' ; ');
+    return (filled >= 2 ? `table, ${rows.size} rows, ${filled} filled cells: ${table}` : table).slice(0, 800);
   }
-  return readingOrder(pairFractions(await readRegionWords(src, langs))).slice(0, 500);
+  return readingOrder(pairFractions(await readRegionTokens(src, langs))).slice(0, 500);
 }
 const MAX_TABLE_CELLS = 30;
 

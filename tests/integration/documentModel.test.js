@@ -95,7 +95,14 @@ describe('fractions printed as pictures (MHLE-29: teacher saw invented values)',
   test('a table drawn as a picture is read cell by cell, keeping its rows', () => {
     const t4 = doc.text.slice(doc.text.indexOf('Task 4'));
     expect(t4).toMatch(/\(text in picture: [^)]*\|[^)]*;[^)]*\)/);
-    expect(t4).toContain('1/2 9/9');
+    expect(t4).toContain('table, 3 rows, 9 filled cells:');
+  });
+
+  test('every stacked fraction in the Task 4 table is read exactly, with its answer box', () => {
+    const t4 = doc.text.slice(doc.text.indexOf('Task 4'), doc.text.indexOf('Task 5'));
+    for (const pair of ['7/11 □ 6/11', '1/2 □ 9/9', '11/6 □ 1/2', '1/2 □ 11/2', '8/2 □ 8/1', '8/8 □ 8/12', '1/10 □ 8/8', '1/7 □ 12/7', '7/7 □ 12/6']) {
+      expect(t4).toContain(pair);
+    }
   });
 });
 

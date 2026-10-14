@@ -3,7 +3,7 @@
 jest.mock('../../services/supabase', () => ({ from: jest.fn() }));
 const { Jimp } = require('jimp');
 const { pairFractions, readingOrder } = require('../../services/worksheet/documentModel');
-const { findGridCells } = require('../../services/worksheet/pngImage');
+const { findGridCells, findFractionBars } = require('../../services/worksheet/pngImage');
 const { resolvePictureRefs, attachRegionPictures, dropTextOnlyPictures } = require('../../services/worksheet/regionCrops');
 const { renderQuizHTML } = require('../../utils/quizHtmlRenderer');
 const { flagUnverifiedNumbers, buildConversionReport } = require('../../services/quizVision');
@@ -40,6 +40,27 @@ describe('findGridCells', () => {
 
   test('a framed picture (one enclosed cell) is not a table', () => {
     expect(findGridCells(draw(300, 200, [[20, 20, 280, 21], [20, 180, 280, 181], [20, 20, 21, 181], [279, 20, 280, 181]]))).toBeNull();
+  });
+});
+
+describe('findFractionBars', () => {
+  const rect = (img, x0, y0, x1, y1) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) img.setPixelColor(0x000000ff, x, y); };
+  // "digits" as solid blocks: 3/4 □ 5/6
+  const img = new Jimp({ width: 200, height: 80, color: 0xffffffff });
+  rect(img, 22, 10, 30, 30); rect(img, 18, 36, 37, 37); rect(img, 22, 43, 30, 63); // fraction 1
+  rect(img, 60, 20, 85, 21); rect(img, 60, 50, 85, 51); rect(img, 60, 20, 61, 51); rect(img, 84, 20, 85, 51); // box
+  rect(img, 122, 10, 130, 30); rect(img, 118, 36, 137, 37); rect(img, 122, 43, 130, 63); // fraction 2
+
+  test('finds each bar with its numerator and denominator bands, and the answer box', () => {
+    const { bars, boxes } = findFractionBars(img);
+    expect(bars.map(b => [b.x0, b.y, b.num.y, b.num.h, b.den.y, b.den.h])).toEqual([[18, 36, 10, 21, 43, 21], [118, 36, 10, 21, 43, 21]]);
+    expect(boxes).toEqual([{ x: 60, y: 20, w: 26, h: 32 }]);
+  });
+
+  test('an underline with nothing below it is not a fraction', () => {
+    const u = new Jimp({ width: 100, height: 60, color: 0xffffffff });
+    rect(u, 20, 10, 60, 30); rect(u, 18, 34, 62, 35);
+    expect(findFractionBars(u).bars).toEqual([]);
   });
 });
 
