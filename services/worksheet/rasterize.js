@@ -7,10 +7,10 @@ const fs = require('fs');
 const DEFAULT_SCALE = 2.6; // ≈190 dpi — reliable for Telugu/Devanagari OCR
 
 async function rasterizePdfPages(pdfBuffer, { maxPages = 12, scale = DEFAULT_SCALE } = {}) {
-  const puppeteer = require('puppeteer');
+  const { launchBrowser } = require('../../utils/browser');
   const pdfjsSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.js'), 'utf8');
   const workerSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.worker.js'), 'utf8');
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] });
+  const browser = await launchBrowser(['--disable-dev-shm-usage']);
   try {
     const page = await browser.newPage();
     await page.addScriptTag({ content: pdfjsSrc });

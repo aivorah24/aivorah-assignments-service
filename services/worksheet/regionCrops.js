@@ -6,7 +6,8 @@
 //   2. A task that needs a picture but has none in its region shows the
 //      region itself, cropped from the page (vector drawings, grids, shapes
 //      drawn with Word's tools).
-//   3. Picture ids from the transcript (img://p1-3) become real URLs — or an
+//   3. A picture that only prints the task's own questions is dropped.
+//   4. Picture ids from the transcript (img://p1-3) become real URLs — or an
 //      inline image when hosting isn't configured, so nothing goes missing.
 const { tokensOf } = require('./documentModel');
 
@@ -15,6 +16,7 @@ const MAX_REGION_RATIO = 0.7; // a whole page is not a "diagram"
 
 function taskNeedsPicture(task) {
   const qs = task.questions || [];
+  if (task.picturesAsText) return false;
   if (qs.some(q => q.imageUrl)) return false;
   return !!task.sharedImage || qs.some(q => q.hasImage || q.visualUnderstandingRequired);
 }
@@ -71,6 +73,43 @@ function attachRegionPictures(quiz, doc) {
   return attached;
 }
 
+// What a picture prints, as tokens: "1) 28/50 ; 8/24" → 28/50, 8/24. Item
+// numbers ("1)", a lone "5") are left out — they're the question labels.
+function pictureTokens(labels) {
+  return String(labels || '').split(/[\s;|]+/)
+    .filter(t => t && !/^\d\)?$/.test(t) && !/^[—–-]$/.test(t))
+    .map(t => t.toLowerCase());
+}
+
+// A picture that only prints the task's own questions (fractions laid out as
+// an image) adds nothing once those values are in the questions: showing it
+// repeats Q1–Q4 under Q1. Pictures with anything else (a conversion chart,
+// unread values) stay.
+function dropTextOnlyPictures(quiz, doc) {
+  const byId = new Map(((doc && doc.pictures) || []).map(p => [p.id, p]));
+  let dropped = 0;
+  for (const task of quiz.tasks || []) {
+    const qs = task.questions || [];
+    const text = qs.map(q => `${q.question || ''} ${(q.options || []).join(' ')}`).join(' ').replace(/\s+/g, '').toLowerCase();
+    const refs = qs.filter(q => typeof q.imageUrl === 'string' && byId.has(q.imageUrl));
+    if (!refs.length) continue;
+    const textOnly = refs.every((q) => {
+      const tokens = pictureTokens(byId.get(q.imageUrl).labels);
+      return tokens.length >= 2 && tokens.every(t => text.includes(t));
+    });
+    if (!textOnly) continue;
+    for (const q of qs) {
+      if (q.imageUrl && byId.has(q.imageUrl)) delete q.imageUrl;
+      delete q.hasImage;
+      delete q.visualUnderstandingRequired;
+    }
+    task.sharedImage = false;
+    task.picturesAsText = true;
+    dropped++;
+  }
+  return dropped;
+}
+
 async function cropRegion(pageImage, pageSize, top, bottom) {
   const { jimpFromPng, pngBuffer } = require('./pngImage');
   const img = jimpFromPng(pageImage.buffer);
@@ -91,6 +130,7 @@ const dataUri = p => `data:${p.mime || 'image/png'};base64,${p.buffer.toString('
 async function attachRegionCrops(quiz, doc, hostImages) {
   if (!doc || !doc.anchors) return 0;
   attachRegionPictures(quiz, doc);
+  dropTextOnlyPictures(quiz, doc);
   if (!doc.pageImages || !doc.pageImages.length) return 0;
   const jobs = [];
   for (const r of taskRegions(quiz, doc)) {
@@ -132,4 +172,4 @@ function resolvePictureRefs(quiz, doc) {
   return quiz;
 }
 
-module.exports = { attachRegionCrops, attachRegionPictures, resolvePictureRefs, findAnchor, taskNeedsPicture };
+module.exports = { attachRegionCrops, attachRegionPictures, dropTextOnlyPictures, resolvePictureRefs, findAnchor, taskNeedsPicture };

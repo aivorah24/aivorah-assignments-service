@@ -30,7 +30,8 @@ describe('POST /quiz/render-preview — real rendering', () => {
     });
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/html/);
-    expect(res.text).toContain('What is 1/2 + 1/4?');
+    // Fractions are shown stacked, as printed on worksheets.
+    expect(res.text).toContain('What is <span class="frac"><span>1</span><span>2</span></span> + <span class="frac"><span>1</span><span>4</span></span>?');
   });
 
   test('autoDetectMCQ converts an inline-options text question into a real MCQ before rendering', async () => {

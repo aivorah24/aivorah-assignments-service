@@ -1428,11 +1428,11 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, s
 // route through the already-working Qwen vision path - giving the PDF
 // fallback the same visual reading capability Gemini has.
 async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
-  const puppeteer = require('puppeteer');
+  const { launchBrowser } = require('../utils/browser');
   const fs = require('fs');
   const pdfjsSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.js'), 'utf8');
   const pdfjsWorkerSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.worker.js'), 'utf8');
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage();
     await page.addScriptTag({ content: pdfjsSrc });

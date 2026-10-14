@@ -131,7 +131,7 @@ async function hostEmbeddedImages(html) {
 
 async function docxToPdf(buffer) {
   const mammoth = require('mammoth');
-  const puppeteer = require('puppeteer');
+  const { launchBrowser } = require('../utils/browser');
   const { htmlToStructuredText } = require('../services/quizVision');
   const { value: bodyHtml } = await mammoth.convertToHtml({ buffer });
   const hostedHtml = await hostEmbeddedImages(bodyHtml);
@@ -145,7 +145,7 @@ async function docxToPdf(buffer) {
     h1,h2,h3 { margin: 12px 0 6px; }
     p { margin: 6px 0; }
   </style></head><body>${bodyHtml}</body></html>`;
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage();
     // Puppeteer's default navigation timeout is 30s, and mammoth embeds

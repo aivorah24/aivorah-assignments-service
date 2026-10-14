@@ -4,7 +4,8 @@ jest.mock('../../services/supabase', () => ({ from: jest.fn() }));
 const { Jimp } = require('jimp');
 const { pairFractions, readingOrder } = require('../../services/worksheet/documentModel');
 const { findGridCells } = require('../../services/worksheet/pngImage');
-const { resolvePictureRefs, attachRegionPictures } = require('../../services/worksheet/regionCrops');
+const { resolvePictureRefs, attachRegionPictures, dropTextOnlyPictures } = require('../../services/worksheet/regionCrops');
+const { renderQuizHTML } = require('../../utils/quizHtmlRenderer');
 const { flagUnverifiedNumbers, buildConversionReport } = require('../../services/quizVision');
 
 const word = (text, x0, y0, x1, y1) => ({ text, confidence: 95, bbox: { x0, y0, x1, y1 } });
@@ -106,5 +107,58 @@ describe('flagUnverifiedNumbers', () => {
     const quiz = { tasks: [{ title: 'T', questions: [{ question: 'Reduce 24/36' }] }] };
     flagUnverifiedNumbers(quiz, { visualUnderstandingAvailable: true, sourceText: 'nothing' });
     expect(quiz.tasks[0].unverifiedValues).toBeUndefined();
+  });
+});
+
+describe('dropTextOnlyPictures (MHLE-29: the Task 2 picture repeated Q1–Q4 under Q1)', () => {
+  const doc = { pictures: [
+    { id: 'img://p1-1', labels: 'x1000 x1000 ; KL L mL' },
+    { id: 'img://p1-2', labels: '1) 28/50 ; 8/24 ; 30/54 ; 18/42' },
+    { id: 'img://p1-4', labels: '5 32/48 ; 36/54' },
+    { id: 'img://p2-5', labels: '7 6 | 1/2 9/9 | se 2' },
+  ] };
+
+  test('a picture that only prints the task\'s own questions is dropped, and no crop replaces it', () => {
+    const task = { title: 'Task 2', questions: [
+      { question: '28/50', imageUrl: 'img://p1-2', hasImage: true }, { question: '8/24' }, { question: '30/54' }, { question: '18/42' },
+      { question: '32/48', imageUrl: 'img://p1-4', hasImage: true }, { question: '36/54' },
+    ] };
+    expect(dropTextOnlyPictures({ tasks: [task] }, doc)).toBe(1);
+    expect(task.questions.some(q => q.imageUrl || q.hasImage)).toBe(false);
+    expect(task.picturesAsText).toBe(true);
+  });
+
+  test('a chart whose content is not in the questions stays (Task 1: ×1000 arrows)', () => {
+    const task = { title: 'Task 1', questions: [{ question: '4 kg = ___ gm', imageUrl: 'img://p1-1' }, { question: '1000 ml = ___ l' }] };
+    dropTextOnlyPictures({ tasks: [task] }, doc);
+    expect(task.questions[0].imageUrl).toBe('img://p1-1');
+  });
+
+  test('a picture with values the questions do not have stays (Task 4: unread table)', () => {
+    const task = { title: 'Task 4', questions: [{ question: '1/2 ☐ 9/9', imageUrl: 'img://p2-5' }] };
+    dropTextOnlyPictures({ tasks: [task] }, doc);
+    expect(task.questions[0].imageUrl).toBe('img://p2-5');
+  });
+});
+
+describe('student page: fractions and worked examples', () => {
+  const quiz = { title: 'Fractions', tasks: [{ title: 'Task 2: Reduce', example: 'To reduce 18/21 divide by 3', questions: [
+    { id: '1', type: 'fraction', question: '28/50', answer: '14/25' },
+    { id: '2', type: 'text', question: 'Is 1/2 < 9/9? Due 13/03/2026', answer: 'yes' },
+  ] }] };
+  const html = renderQuizHTML(JSON.parse(JSON.stringify(quiz)), {});
+
+  test('fractions are stacked as printed; dates are not', () => {
+    expect(html).toContain('<span class="frac"><span>28</span><span>50</span></span>');
+    expect(html).toContain('13/03/2026');
+    expect(html).not.toMatch(/<span>13<\/span><span>03/);
+  });
+
+  test('question text from the document is escaped', () => {
+    expect(html).toContain('&lt; <span class="frac"><span>9</span><span>9</span></span>');
+  });
+
+  test('the task\'s worked example is shown', () => {
+    expect(html).toMatch(/task-example[^>]*>.*Example:.*To reduce <span class="frac"><span>18<\/span><span>21<\/span><\/span>/);
   });
 });

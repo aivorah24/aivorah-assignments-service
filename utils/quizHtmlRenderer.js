@@ -765,7 +765,10 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
   // Bold key numbers/words in question text
   function fmtQuestion(text) {
     if (!text) return '';
-    let s = String(text);
+    // Escaped first: question text comes from the uploaded document ("1/2 < 9/9").
+    let s = escapeHtml(text);
+    // "28/50" → stacked, as printed on the worksheet (not dates like 13/03/2026).
+    s = s.replace(/(^|[^\d/])(\d{1,4})\/(\d{1,4})(?![\d/])/g, '$1<span class="frac"><span>$2</span><span>$3</span></span>');
     // Bold numbers with units: "65 m", "450 m", "200 m", "40 cm", etc.
     s = s.replace(/(\d+(?:\.\d+)?)\s*(m²|cm²|km|m|cm|mm|kg|g|mg|kL|L|mL|tiles|degrees|rounds)\b/g, '<strong>$1 $2</strong>');
     // Bold key action words
@@ -1356,7 +1359,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     <div class="task-block" style="border-left:5px solid ${s.border}; background:${s.bg}; border-radius:12px; padding:20px 24px; margin:28px 0;">
       ${task.tier ? `<span class="tier-badge" style="display:inline-block;background:${s.labelBg};color:${s.label};font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;padding:4px 12px;border-radius:4px;margin-bottom:6px;">${task.tier}</span>` : ''}
       <h2 style="font-size:18px;color:${s.label};margin:6px 0 18px;font-weight:700;">${taskTitle}</h2>
-      ${task.passage ? `<div style="margin:0 0 20px;padding:16px 20px;background:rgba(255,255,255,0.04);border:1px solid rgba(195,220,216,0.2);border-radius:10px;font-size:14px;color:#D8E8E6;line-height:1.8;">${fmt(task.passage)}</div>` : ''}`;
+      ${task.passage ? `<div style="margin:0 0 20px;padding:16px 20px;background:rgba(255,255,255,0.04);border:1px solid rgba(195,220,216,0.2);border-radius:10px;font-size:14px;color:#D8E8E6;line-height:1.8;">${fmt(task.passage)}</div>` : ''}
+      ${task.example ? `<div class="task-example" style="margin:0 0 20px;padding:10px 14px;background:rgba(195,220,216,0.07);border-left:3px solid rgba(195,220,216,0.4);border-radius:0 8px 8px 0;font-size:13px;color:#A8B5B3;"><strong style="color:#C3DCD8;">Example:</strong> ${fmtQuestion(task.example)}</div>` : ''}`;
 
     // ── MATCH-THE-FOLLOWING: drag & drop words onto pictures (replaces per-question rendering) ──
     if (task._matchTask) {
@@ -1690,6 +1694,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
               box-shadow: 0 2px 8px rgba(0,0,0,0.3); border: 1px solid rgba(195,220,216,0.12); }
     .q-text { font-size: 15px; color: #F0EEEC; margin-bottom: 14px; line-height: 1.6; }
     .q-text strong { color: #C3DCD8; }
+    .frac { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; line-height: 1.15; margin: 0 2px; }
+    .frac > span:first-child { border-bottom: 1.5px solid currentColor; padding: 0 3px; }
 
     /* ── Input row ── */
     .q-input-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
