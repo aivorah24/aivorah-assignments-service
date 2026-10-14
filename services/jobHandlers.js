@@ -10,16 +10,20 @@ const { registerHandler } = require('./jobQueue');
 // /assignments/extract-questions endpoint.
 registerHandler('worksheet_extract', async (payload) => {
   const { extractWorksheetContent } = require('../routes/assignments');
-  return extractWorksheetContent(payload.fileList);
+  return extractWorksheetContent(payload.fileList, { fileName: payload.fileName });
 });
 
 // Real quiz-generation job — reuses the exact same Gemini-vision function as
 // the synchronous POST /quiz/generate, so the queued path can never drift
 // from what the synchronous endpoint does.
 registerHandler('quiz_generate', async (payload) => {
-  const { generateQuizFromPdf } = require('./quizVision');
+  const { generateQuizFromDocument } = require('./quizVision');
   const buffer = Buffer.from(payload.fileBase64, 'base64');
-  const quiz = await generateQuizFromPdf(buffer, { grade: payload.grade, subject: payload.subject, school: payload.school, structuredText: payload.structuredText });
+  const quiz = await generateQuizFromDocument({
+    buffer, mime: payload.mimeType || 'application/pdf',
+    grade: payload.grade, subject: payload.subject, school: payload.school,
+    structuredText: payload.structuredText, language: payload.language,
+  });
   return { quiz };
 });
 

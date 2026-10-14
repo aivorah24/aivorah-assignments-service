@@ -46,6 +46,56 @@ async function fetchBranding(school, curriculum) {
   }
 }
 
+// GET /quiz/providers → which AI providers currently work (cached 5 min;
+// ?refresh=1 re-checks). The fastest way to see why worksheets convert as
+// text-only: a dead/over-quota vision key shows here with its error.
+router.get('/providers', async (req, res) => {
+  try {
+    const { checkProviders } = require('../services/worksheet/providers');
+    res.json(await checkProviders({ force: req.query.refresh === '1' }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /quiz/grade-answer { expected, student, question?, acceptableAnswers?, worksheetScript? }
+// → { verdict: 'correct' | 'partial' | 'incorrect', reason }
+// Called by the student worksheet page when its instant checks can't decide.
+// Deterministic checks first: an answer in the wrong writing system (Tamil on
+// a Telugu worksheet) is never "correct", whatever the model says.
+router.post('/grade-answer', express.json({ limit: '64kb' }), async (req, res) => {
+  const { dominantScript, requiredScript, isWrongScript, matchesAnyAnswer } = require('../utils/answerCheck');
+  const { expected = '', student = '', question = '', acceptableAnswers = [], worksheetScript = '' } = req.body || {};
+  const studentText = String(student).slice(0, 2000);
+  if (!studentText.trim()) return res.status(400).json({ error: 'student answer required' });
+  const keys = [expected, ...(Array.isArray(acceptableAnswers) ? acceptableAnswers : [])].map(String);
+  if (isWrongScript(studentText, expected, worksheetScript)) {
+    return res.json({ verdict: 'incorrect', reason: `Please write your answer in ${requiredScript(expected, worksheetScript)} script.` });
+  }
+  if (matchesAnyAnswer(studentText, keys)) return res.json({ verdict: 'correct', reason: '' });
+  if (!String(expected).trim()) return res.json({ verdict: 'incorrect', reason: '' }); // nothing to judge against
+  try {
+    const { callGroqWithText } = require('../services/quizVision');
+    const prompt = `You grade a primary-school student's answer. Judge MEANING, not spelling of minor words.
+Rules:
+- "correct": same meaning as the expected answer (a paraphrase or a shorter form that still answers the question is fine).
+- "partial": partly right (one of two required parts, or the right idea with a factual slip).
+- "incorrect": wrong, off-topic, empty of meaning, or in a different language than the expected answer. Expected answer language/script: ${dominantScript(expected) || 'any'}.
+Return JSON: {"verdict":"correct|partial|incorrect","reason":"one short, kind sentence for the student, in the language of the expected answer"}.
+
+Question: ${String(question).slice(0, 600)}
+Expected answer: ${String(expected).slice(0, 1000)}
+${keys.length > 1 ? `Also acceptable: ${keys.slice(1).join(' / ').slice(0, 600)}\n` : ''}Student answer: ${studentText}`;
+    const raw = await callGroqWithText(prompt, { maxTokens: 800 });
+    const parsed = JSON.parse(raw);
+    const verdict = ['correct', 'partial', 'incorrect'].includes(parsed.verdict) ? parsed.verdict : 'incorrect';
+    res.json({ verdict, reason: String(parsed.reason || '').slice(0, 300) });
+  } catch (err) {
+    console.warn('[quiz/grade-answer] grading failed:', err.message);
+    res.status(503).json({ verdict: 'incorrect', reason: '', error: 'grading unavailable' });
+  }
+});
+
 // GET /quiz/transliterate?text=namaste&lang=hi → { suggestions: ['नमस्ते', …] }
 // Phonetic English → worksheet script for the student quiz IME (and the app's
 // TransliterationInput). Proxies Google Input Tools, which blocks browser CORS.
@@ -110,9 +160,9 @@ router.post('/normalize', async (req, res) => {
 router.post('/generate-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No image file uploaded' });
-    const { grade, subject, school } = req.body;
+    const { grade, subject, school, language } = req.body;
     const mime = req.file.mimetype || 'image/png';
-    const quiz = await generateQuizFromImage(req.file.buffer, mime, { grade, subject, school });
+    const quiz = await generateQuizFromImage(req.file.buffer, mime, { grade, subject, school, language });
     res.json({ quiz });
   } catch (err) {
     if (err.message === 'AI returned invalid JSON') {
@@ -131,8 +181,8 @@ router.post('/generate-image', upload.single('image'), async (req, res) => {
 router.post('/generate', upload.single('pdf'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No PDF file uploaded' });
-    const { grade, subject, school, structuredText } = req.body;
-    const quiz = await generateQuizFromPdf(req.file.buffer, { grade, subject, school, structuredText });
+    const { grade, subject, school, structuredText, language } = req.body;
+    const quiz = await generateQuizFromPdf(req.file.buffer, { grade, subject, school, structuredText, language });
     res.json({ quiz });
   } catch (err) {
     if (err.message === 'AI returned invalid JSON') {
@@ -145,12 +195,12 @@ router.post('/generate', upload.single('pdf'), async (req, res) => {
 // ── POST /quiz/generate-async — same as /generate, queued so the browser
 // tab doesn't hold one connection open for the whole AI generation pipeline.
 router.post('/generate-async', express.json({ limit: '10mb' }), async (req, res) => {
-  const { fileBase64, mimeType, filename, grade, subject, school, structuredText } = req.body || {};
+  const { fileBase64, mimeType, filename, grade, subject, school, structuredText, language } = req.body || {};
   if (!fileBase64) return res.status(400).json({ error: 'fileBase64 required' });
   try {
     const { jobId } = await publishJob('quiz_generate', {
       fileBase64, mimeType: mimeType || 'application/pdf', filename: filename || 'worksheet.pdf',
-      grade, subject, school, structuredText,
+      grade, subject, school, structuredText, language,
     });
     res.json({ jobId });
   } catch (e) {

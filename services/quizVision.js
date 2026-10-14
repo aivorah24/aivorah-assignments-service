@@ -434,6 +434,9 @@ RULES:
    f) CREDITS: if the document contains a credits/attribution/author line (e.g. "Credits: ...", a team or author name at the bottom), copy it verbatim into a top-level "credits" string.
    g) If uncertain whether something qualifies for one of the fields above, prefer including it over dropping it — losing real content is worse than an over-inclusive extraction.
 
+14. LANGUAGE (CRITICAL for language worksheets — Telugu, Hindi, Tamil, French, ...): keep every question, passage, option and answer in the SAME language and script as the worksheet. Never translate the worksheet's content into English and never transliterate it into Latin letters. An English gloss may be added after the original instruction in a task title, but questions and answers stay in the original script. "answer" must be written exactly as a student is expected to write it, in that script (e.g. "గద్ద గాలిలో ఎగురుతుంది"), and for questions with more than one acceptable wording add "acceptableAnswers": ["...", "..."]. Set top-level "language" to the worksheet's language name (e.g. "Telugu"; "English" for English worksheets).
+15. NEVER LEAVE A REAL QUESTION WITHOUT AN ANSWER KEY. Fill-in-the-blank, rewrite-the-sentence, find-the-word and comprehension questions ALL have a definite answer you can derive from the worksheet (the passage, the sentences, the word list) — write it. Only genuinely personal/creative prompts (draw, "write about your holiday", opinions) may omit "answer"; mark those "type": "long".
+
 LAYOUT EXTRACTION (CRITICAL — replicate the worksheet's visual layout):
 - Look at how questions are arranged: single column, two columns side-by-side, grid, etc.
 - For each task, include a "layout" object describing the visual arrangement.
@@ -452,6 +455,7 @@ Return this EXACT JSON structure:
   "subject": "${subject || 'Mathematics'}",
   "grade": "${grade || 'PYP 4'}",
   "school": "${school || ''}",
+  "language": "the worksheet's language, e.g. English / Telugu / Hindi",
   "purpose": "the Purpose/objective line stated on the worksheet, verbatim (empty string if none)",
   "learningOutcomes": ["each Learning Outcome bullet point, exactly as written on the worksheet"],
   "wordBank": ["each word from a printed Word Bank/Vocabulary List, verbatim, in order — empty array if none"],
@@ -918,6 +922,29 @@ function findMissingNamedBlocks(quiz, sourceText) {
   return missing;
 }
 
+// Text-only conversions: a number in a question that appears nowhere in the
+// worksheet transcript was guessed (e.g. fractions printed as a picture the
+// OCR couldn't read). Those tasks are flagged for review, never passed off as
+// exact. A vision provider read the page itself, so it isn't second-guessed.
+function flagUnverifiedNumbers(quiz, { visualUnderstandingAvailable, sourceText }) {
+  if (visualUnderstandingAvailable || !sourceText) return quiz;
+  const known = new Set(String(sourceText).match(/\d+(?:\.\d+)?/g) || []);
+  for (const task of quiz.tasks || []) {
+    const missing = new Set();
+    for (const q of task.questions || []) {
+      const texts = [q.question, ...(Array.isArray(q.options) ? q.options.map(o => (o && typeof o === 'object' ? o.text : o)) : [])];
+      const nums = texts.join(' ').match(/\d+(?:\.\d+)?/g) || [];
+      const unknown = [...new Set(nums)].filter(n => !known.has(n));
+      if (unknown.length) {
+        q.unverifiedValues = unknown;
+        unknown.forEach(n => missing.add(n));
+      }
+    }
+    if (missing.size) task.unverifiedValues = [...missing];
+  }
+  return quiz;
+}
+
 function buildConversionReport(quiz, { sourceSectionEstimate, sourceText } = {}) {
   const items = (quiz.tasks || []).map(t => {
     if (!taskHasRealContent(t)) {
@@ -929,6 +956,9 @@ function buildConversionReport(quiz, { sourceSectionEstimate, sourceText } = {})
     }
     if (t.contentGroundingUncertain) {
       return { title: t.title, status: 'REQUIRES_REVIEW', reason: t.contentGroundingNote || CONTENT_GROUNDING_NOTE };
+    }
+    if (Array.isArray(t.unverifiedValues) && t.unverifiedValues.length) {
+      return { title: t.title, status: 'REQUIRES_REVIEW', reason: `Some values (${t.unverifiedValues.slice(0, 8).join(', ')}) were not found in the worksheet's text and may be misread from a picture — check them against the original before publishing.` };
     }
     const interactionIssue = (t.questions || []).map(validateQuestionInteraction).find(Boolean);
     if (interactionIssue) {
@@ -1146,53 +1176,10 @@ async function retryIncompleteTasks(quiz, retryFn) {
   return quiz;
 }
 
-// Increment 1 (+ Qwen fallback, added 2026-09-11; + completeness retry,
-// added 2026-09-12): single image → quiz JSON. Gemini first; if it throws
-// for ANY reason (including the currently depleted key), falls back to
-// Qwen — live-verified working right now. After a successful response,
-// checks for any task that came back with a title but no real content
-// (see retryIncompleteTasks) and does one retry against whichever engine
-// actually answered, re-asking specifically for those tasks. No OCR
-// cross-validation, no diagram matching, no independent answer-
-// verification pass yet — see QUIZ_PIPELINE_MIGRATION.md.
-async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school } = {}) {
-  const parts = geminiImageParts([{ buffer: imageBuffer, mime }]);
-  let raw, retryFn, visualUnderstandingAvailable = true, sourceText = '';
-  try {
-    raw = await withTimeout(callGeminiVision(parts, { grade, subject, school }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
-    const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
-    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt }]);
-  } catch (geminiErr) {
-    classifyProviderError('gemini', geminiErr);
-    // Was: one-shot Qwen structuring (Qwen reads the image AND builds the
-    // full quiz JSON in a single call). Found unreliable 2026-09-12 - see
-    // the finding above - and additionally couldn't handle non-Latin
-    // scripts (Qwen hallucinated Telugu text entirely). Now: OCR (script-
-    // aware - Tesseract for detected Indic scripts, Qwen for Latin/
-    // English) + Groq structuring, the same reliable split already used
-    // for the PDF fallback. This path has NO vision capability at all -
-    // it can only read text, so any question dependent on understanding
-    // a diagram's visual content cannot be answered here (the model is
-    // instructed to decline rather than fabricate - see
-    // buildQuizVisionPrompt's accuracy rules). visualUnderstandingAvailable
-    // is set to false so callers can distinguish this explicitly (Phase 4:
-    // "TEXT-ONLY SUCCESS vs FULL VISUAL UNDERSTANDING" must never be
-    // confused for each other).
-    visualUnderstandingAvailable = false;
-    sourceText = await callOcrText(imageBuffer, mime);
-    raw = await buildQuizFromWorksheetText(sourceText, { grade, subject, school });
-    retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${sourceText.slice(0, 12000)}`);
-  }
-  const quiz = applyExplicitMetadata(normalizeQuestionFields(parseQuizResponse(raw)), sourceText);
-  const result = applyExplicitMetadata(normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn)), sourceText);
-  result.visualUnderstandingAvailable = visualUnderstandingAvailable;
-  enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
-  flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
-  result.extractionStatus = computeExtractionStatus(result);
-  const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
-  result.conversionReport = buildConversionReport(result, { sourceSectionEstimate, sourceText });
-  result.conversionReport.sourceSectionEstimate = sourceSectionEstimate;
-  return result;
+// Single image → quiz JSON. Same provider-agnostic flow as PDFs: see
+// generateQuizFromDocument.
+async function generateQuizFromImage(imageBuffer, mime, { grade, subject, school, language } = {}) {
+  return generateQuizFromDocument({ buffer: imageBuffer, mime: mime || 'image/png', grade, subject, school, language });
 }
 
 // Structures already-extracted worksheet TEXT into quiz JSON via Groq's
@@ -1327,22 +1314,21 @@ function looksLikeDecodableImage(buffer) {
 // Defaults to 'eng' (keeping Qwen as the OCR engine) on any detection
 // failure or unrecognized/Latin script - this only ever ADDS Tesseract
 // for scripts it's confirmed better at, never removes Qwen's coverage.
+// Uses the bundled, offline language packs (services/worksheet/ocrEngine.js):
+// the default Tesseract.detect needs the legacy OSD model + a CDN download,
+// so it failed and every page was OCR'd as English.
 async function detectScriptLang(imageBuffer) {
   if (!looksLikeDecodableImage(imageBuffer)) return 'eng';
-  try {
-    const Tesseract = require('tesseract.js');
-    const { data } = await Tesseract.detect(imageBuffer);
-    return TESSERACT_SCRIPT_TO_LANG[data.script] || 'eng';
-  } catch {
-    return 'eng';
-  }
+  const { detectScript } = require('./worksheet/ocrEngine');
+  const script = await detectScript(imageBuffer);
+  return TESSERACT_SCRIPT_TO_LANG[script] || 'eng';
 }
 
 async function callTesseractOcrText(imageBuffer, lang) {
   if (!looksLikeDecodableImage(imageBuffer)) throw new Error('Tesseract: input is not a decodable image');
-  const Tesseract = require('tesseract.js');
-  const { data } = await Tesseract.recognize(imageBuffer, lang === 'eng' ? 'eng' : `${lang}+eng`);
-  return data.text || '';
+  const { ocrImage } = require('./worksheet/ocrEngine');
+  const { text } = await ocrImage(imageBuffer, lang === 'eng' ? ['eng'] : [lang, 'eng']);
+  return text || '';
 }
 
 // OCR router - Tesseract is now PRIMARY for every script, English
@@ -1442,11 +1428,11 @@ async function callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, s
 // route through the already-working Qwen vision path - giving the PDF
 // fallback the same visual reading capability Gemini has.
 async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
-  const puppeteer = require('puppeteer');
+  const { launchBrowser } = require('../utils/browser');
   const fs = require('fs');
   const pdfjsSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.js'), 'utf8');
   const pdfjsWorkerSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.worker.js'), 'utf8');
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage();
     await page.addScriptTag({ content: pdfjsSrc });
@@ -1493,50 +1479,120 @@ async function rasterizePdfPagesToImage(pdfBuffer, { maxPages = 4 } = {}) {
   }
 }
 
-// Increment 8 (PDF path): a PDF (or a docx already converted to PDF
-// upstream via docx-to-pdf) → quiz JSON. Gemini first; on failure (e.g.
-// the currently depleted key), falls back to callGroqTextVisionFallback,
-// which itself tries pdf-parse text then Qwen OCR + Groq structuring (see
-// that function's own comments - asking Qwen to do full one-shot
-// structured extraction, tried first here, was found unreliable on
-// 2026-09-12: it followed the JSON schema but left "tasks"/"questions"
-// empty for two different real worksheets while still reading the title
-// correctly - a model-capability limit, not a code bug, worked around by
-// splitting OCR (Qwen's strength) from structuring (Groq's strength)).
-// Powers both the sync /quiz/generate route and the queued
+// PDF (or a docx already converted to PDF upstream, with its exact
+// structuredText) → quiz JSON. Powers /quiz/generate and the queued
 // /quiz/generate-async job.
-async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structuredText } = {}) {
-  const parts = [geminiPdfPart(pdfBuffer)];
-  let raw, retryFn, visualUnderstandingAvailable = true, sourceText = '';
+async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structuredText, language } = {}) {
+  return generateQuizFromDocument({ buffer: pdfBuffer, mime: 'application/pdf', grade, subject, school, structuredText, language });
+}
+
+// ── Provider-agnostic worksheet → quiz ────────────────────────────────────
+// 1. Document model (no AI): per-page text layer + OCR + pictures placed
+//    inline (services/worksheet/documentModel.js).
+// 2. First provider that answers, each given that transcript as ground truth:
+//    Gemini vision (whole PDF/image) → Mistral vision (page images) → Groq
+//    text (transcript only). Only the last is "text-only".
+// 3. The same post-processing for every provider.
+// Root cause this replaces (2026-10-13): with Gemini unavailable every
+// worksheet fell to a text path that trusted a broken Indic text layer,
+// skipped OCR when it had ≥300 chars, OCR'd a stitched ~108dpi strip, and
+// listed pictures without positions — ~20% of real worksheets converted.
+const DOCUMENT_MODEL_TIMEOUT_MS = parseInt(process.env.DOCUMENT_MODEL_TIMEOUT_MS || '150000', 10);
+// With a second vision provider configured, a rate-limited Gemini isn't worth
+// waiting out (its retries back off for up to GEMINI_VISION_TIMEOUT_MS).
+const GEMINI_TIMEOUT_WITH_FALLBACK_MS = parseInt(process.env.GEMINI_TIMEOUT_WITH_FALLBACK_MS || '30000', 10);
+
+async function buildWorksheetDocument({ buffer, mime, structuredText, hints }) {
+  const { buildDocumentModel } = require('./worksheet/documentModel');
+  const { hostPictures } = require('./worksheet/providers');
   try {
-    raw = await withTimeout(callGeminiVision(parts, { grade, subject, school, structuredText }), GEMINI_VISION_TIMEOUT_MS, 'gemini-vision');
-    const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
-    let retryPromptSuffix = '';
-    if (structuredText && structuredText.trim().length > 20) {
-      retryPromptSuffix = `\n\nGROUND TRUTH TEXT (exact - use these values, do not guess from the image):\n${structuredText.slice(0, 12000)}`;
+    return await withTimeout(buildDocumentModel({ buffer, mime, structuredText, hints, hostImages: hostPictures }), DOCUMENT_MODEL_TIMEOUT_MS, 'document-model');
+  } catch (err) {
+    console.warn('[quiz] document model failed, continuing without it:', err.message);
+    return null;
+  }
+}
+
+async function generateQuizFromDocument({ buffer, mime, grade, subject, school, structuredText, language } = {}) {
+  const { callMistralVision, transcriptBlock } = require('./worksheet/providers');
+  const isPdf = /pdf/i.test(mime || '');
+  const doc = await buildWorksheetDocument({ buffer, mime, structuredText, hints: [language, subject] });
+  const transcript = doc && doc.text ? doc.text : (structuredText || '');
+  const basePrompt = buildQuizVisionPrompt({ grade, subject, school });
+
+  let raw, retryFn, provider;
+  let sourceText = transcript;
+
+  // Gemini: reads the original file natively.
+  try {
+    const parts = isPdf ? [geminiPdfPart(buffer)] : geminiImageParts([{ buffer, mime }]);
+    let prompt = basePrompt + transcriptBlock(transcript, { canSeePages: true });
+    if (structuredText && structuredText.trim().length > 20 && !doc) {
+      prompt += `\n\nGROUND TRUTH TEXT (extracted with 100% accuracy from the original document, including exact table cell values marked with [TABLE]/[/TABLE]): use these EXACT values for any text/numbers/table cells.\n\n${structuredText.slice(0, 12000)}`;
     }
-    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt + retryPromptSuffix }]);
+    if (!genAI) throw new Error('GEMINI_API_KEY not configured');
+    const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
+    const geminiBudget = process.env.MISTRAL_API_KEY ? Math.min(GEMINI_TIMEOUT_WITH_FALLBACK_MS, GEMINI_VISION_TIMEOUT_MS) : GEMINI_VISION_TIMEOUT_MS;
+    raw = await withTimeout(geminiGenerate(model, [...parts, { text: prompt }]), geminiBudget, 'gemini-vision');
+    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt + transcriptBlock(transcript, { canSeePages: true }) }]);
+    provider = 'gemini';
   } catch (geminiErr) {
     classifyProviderError('gemini', geminiErr);
-    // Only a Gemini API/network failure falls through to the fallback -
-    // a malformed-JSON response from Gemini itself must still surface as
-    // its own distinct error below (parseQuizResponse, outside this catch),
-    // not silently retry through the fallback as if Gemini had never answered.
-    // This fallback has no vision capability for anything beyond real
-    // embedded PDF images preserved by extractPdfEmbeddedImages (asset
-    // preservation, not understanding) - see generateQuizFromImage's
-    // matching comment for why visualUnderstandingAvailable matters.
-    visualUnderstandingAvailable = false;
-    const fallback = await callGroqTextVisionFallback(pdfBuffer, { grade, subject, school, structuredText });
-    raw = fallback.raw;
-    retryFn = fallback.retryFn;
-    sourceText = fallback.sourceText;
   }
+
+  // Mistral: looks at the rendered pages.
+  const pageImages = doc && doc.pageImages.length ? doc.pageImages : (!isPdf ? [{ buffer, mime }] : []);
+  if (!provider && pageImages.length) {
+    try {
+      const prompt = basePrompt + transcriptBlock(transcript, { canSeePages: true });
+      raw = await callMistralVision(pageImages, prompt);
+      retryFn = (retryPrompt) => callMistralVision(pageImages, retryPrompt + transcriptBlock(transcript, { canSeePages: true }));
+      provider = 'mistral';
+    } catch (mistralErr) {
+      classifyProviderError('mistral', mistralErr);
+    }
+  }
+
+  // Groq text: the transcript only.
+  if (!provider) {
+    if (transcript && transcript.trim().length > 20) {
+      raw = await buildQuizFromWorksheetText(transcript, { grade, subject, school });
+      retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${transcript.slice(0, 14000)}`);
+    } else if (isPdf) {
+      // Document model unavailable — previous text/OCR path.
+      const fallback = await callGroqTextVisionFallback(buffer, { grade, subject, school, structuredText });
+      raw = fallback.raw; retryFn = fallback.retryFn; sourceText = fallback.sourceText;
+    } else {
+      sourceText = await callOcrText(buffer, mime);
+      raw = await buildQuizFromWorksheetText(sourceText, { grade, subject, school });
+      retryFn = (retryPrompt) => callGroqWithText(`${retryPrompt}\n\nWORKSHEET TEXT:\n${sourceText.slice(0, 12000)}`);
+    }
+    provider = 'groq-text';
+  }
+
+  const visualUnderstandingAvailable = provider === 'gemini' || provider === 'mistral';
   const quiz = applyExplicitMetadata(normalizeQuestionFields(parseQuizResponse(raw)), sourceText);
   const result = applyExplicitMetadata(normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn)), sourceText);
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
+  result.provider = provider;
+  if (doc) {
+    result.documentDiagnostics = doc.diagnostics;
+    if (!result.language && doc.scripts.length) result.language = SCRIPT_LANGUAGE_NAMES[doc.scripts[0]] || '';
+  }
   enforceVisualGrounding(result, { visualUnderstandingAvailable, sourceText });
   flagUngroundedTaskContent(result, { visualUnderstandingAvailable, sourceText });
+  flagUnverifiedNumbers(result, { visualUnderstandingAvailable, sourceText });
+  if (doc) {
+    // Tasks without pictures get their region's pictures, or the region itself;
+    // then picture ids become real (or inline) images.
+    const { attachRegionCrops, resolvePictureRefs } = require('./worksheet/regionCrops');
+    const { hostPictures } = require('./worksheet/providers');
+    result.regionCrops = await attachRegionCrops(result, doc, hostPictures).catch((err) => {
+      console.warn('[quiz] region crops failed:', err.message);
+      return 0;
+    });
+    resolvePictureRefs(result, doc);
+  }
   result.extractionStatus = computeExtractionStatus(result);
   const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
   result.conversionReport = buildConversionReport(result, { sourceSectionEstimate, sourceText });
@@ -1544,11 +1600,16 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
   return result;
 }
 
+const SCRIPT_LANGUAGE_NAMES = {
+  Telugu: 'Telugu', Devanagari: 'Hindi', Tamil: 'Tamil', Kannada: 'Kannada', Malayalam: 'Malayalam',
+  Bengali: 'Bengali', Gujarati: 'Gujarati', Gurmukhi: 'Punjabi', Oriya: 'Odia', Arabic: 'Urdu',
+};
+
 module.exports = {
-  generateQuizFromImage, generateQuizFromPdf, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText, extractPdfEmbeddedImages, hostExtractedImages,
+  generateQuizFromImage, generateQuizFromPdf, generateQuizFromDocument, callGeminiVision, callQwenVision, callQwenVisionRaw, callGroqTextVisionFallback, callQwenOcrText, callTesseractOcrText, detectScriptLang, callOcrText, looksLikeDecodableImage, buildQuizFromWorksheetText, callGroqWithText, rasterizePdfPagesToImage, buildQuizVisionPrompt, cleanLLMJson, findIncompleteTasks, retryIncompleteTasks, htmlToStructuredText, extractPdfEmbeddedImages, hostExtractedImages,
   geminiImageParts, geminiPdfPart, geminiRetry, geminiGenerate, geminiModel, withTimeout, GEMINI_VISION_TIMEOUT_MS,
   PROVIDER_STATUS, classifyProviderError,
-  enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE,
+  enforceVisualGrounding, isVisuallyDependentQuestion, isAnswerGroundedInSource, VISUAL_UNAVAILABLE_MESSAGE, flagUnverifiedNumbers,
   computeExtractionStatus, normalizeQuestionFields, flagUngroundedTaskContent, extractContentTokens, CONTENT_GROUNDING_NOTE,
   buildConversionReport, taskHasRealContent, validateQuestionInteraction, estimateSourceSectionCount,
   GROQ_OUTPUT_TRUNCATED,

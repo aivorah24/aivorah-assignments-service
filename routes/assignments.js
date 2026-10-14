@@ -131,7 +131,7 @@ async function hostEmbeddedImages(html) {
 
 async function docxToPdf(buffer) {
   const mammoth = require('mammoth');
-  const puppeteer = require('puppeteer');
+  const { launchBrowser } = require('../utils/browser');
   const { htmlToStructuredText } = require('../services/quizVision');
   const { value: bodyHtml } = await mammoth.convertToHtml({ buffer });
   const hostedHtml = await hostEmbeddedImages(bodyHtml);
@@ -145,7 +145,7 @@ async function docxToPdf(buffer) {
     h1,h2,h3 { margin: 12px 0 6px; }
     p { margin: 6px 0; }
   </style></head><body>${bodyHtml}</body></html>`;
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage();
     // Puppeteer's default navigation timeout is 30s, and mammoth embeds
@@ -697,7 +697,45 @@ const DEMO_MAP = {
 // Ported from ai-mentor/server/routes/assignments.js 2026-09-10 (B02/B04
 // follow-up) - see file header comment for the full rationale, especially
 // why the Qwen/Pixtral vision hops were dropped rather than ported as-is.
-async function extractWorksheetContent(fileList) {
+// Image page, Gemini down: Mistral vision → Qwen vision → OCR + Groq text.
+// The last hop needs no vision provider, so title/grade/chapter still fill in.
+async function extractWithoutGemini(file, extractPrompt) {
+  const buffer = Buffer.from(file.base64, 'base64');
+  if (process.env.MISTRAL_API_KEY) {
+    try {
+      const { callMistralVision } = require('../services/worksheet/providers');
+      return await callMistralVision([{ buffer, mime: file.mime }], extractPrompt);
+    } catch (err) { console.log('[extract] Mistral vision failed:', err.message); }
+  }
+  try {
+    const { callQwenVisionRaw } = require('../services/quizVision');
+    return await callQwenVisionRaw(buffer, file.mime, extractPrompt);
+  } catch (err) { console.log('[extract] Qwen vision failed, reading the page with OCR:', err.message); }
+  const ocr = require('../services/worksheet/ocrEngine');
+  const script = await ocr.detectScript(buffer);
+  const { text } = await ocr.ocrImage(buffer, ocr.langsForScripts(script ? [script] : []));
+  if (!text || !text.trim()) throw new Error('OCR found no text on this page');
+  const completion = await groq.chat.completions.create({
+    model: 'openai/gpt-oss-120b',
+    messages: [{ role: 'user', content: `${extractPrompt}\n\nAssignment text (OCR of the page image):\n${text.slice(0, 4000)}` }],
+    response_format: { type: 'json_object' },
+  });
+  return completion.choices[0].message.content;
+}
+
+// Text a worksheet file prints, cheaply (no OCR): PDF text layer of the first
+// pages, or a .docx's raw text. '' for images.
+async function quickDocumentText(buffer, mime) {
+  try {
+    if (mime === 'application/pdf') return (await require('pdf-parse')(buffer, { max: 2 })).text || '';
+    if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      return (await require('mammoth').extractRawText({ buffer })).value || '';
+    }
+  } catch { /* unreadable — fall back to the file name */ }
+  return '';
+}
+
+async function extractWorksheetContent(fileList, { fileName = '' } = {}) {
   const extractPrompt = `You are analyzing a page from a school worksheet. Extract ALL educational content visible on this page.
 Return ONLY a valid JSON object with these fields:
 {
@@ -823,10 +861,8 @@ GENERAL RULES:
           // (llama-4-scout/maverick both 404 model_not_found as of
           // 2026-09) - falling back to Qwen (HF router) instead, which is
           // confirmed live and working.
-          console.log('[extract] Gemini failed, trying Qwen vision:', geminiErr.message);
-          const { callQwenVisionRaw } = require('../services/quizVision');
-          const buffer = Buffer.from(file.base64, 'base64');
-          raw = await callQwenVisionRaw(buffer, file.mime, extractPrompt);
+          console.log('[extract] Gemini failed:', geminiErr.message);
+          raw = await extractWithoutGemini(file, extractPrompt);
         }
         raw = (raw || '').replace(/```json|```/g, '').trim();
         console.log('[extract] Raw AI response:', raw.slice(0, 500));
@@ -910,6 +946,18 @@ GENERAL RULES:
       } catch (e2) { console.log('[extract] Title fallback failed:', e2.message); }
     }
 
+    // The AI left grade/curriculum/chapter blank (or every provider failed):
+    // read them from the printed header text and the file name instead.
+    if (!merged.grade || !merged.curriculum || !merged.chapter) {
+      const { detectWorksheetMeta } = require('../utils/worksheetMeta');
+      const printed = [merged.title, merged.chapter, merged.taskDescription, ...merged.questions.map(q => q.text)].join('\n');
+      const meta = detectWorksheetMeta({ text: printed, fileName });
+      if (!merged.grade) merged.grade = meta.grade;
+      if (!merged.curriculum) merged.curriculum = meta.curriculum;
+      if (!merged.chapter) merged.chapter = meta.chapter;
+      if (!merged.title && meta.chapter) merged.title = meta.chapter;
+    }
+
     const VALID_SUBJECTS = ['Mathematics', 'Science', 'English', 'Social Studies', 'Language Acquisition', 'Visual Arts', 'ICT', 'Physical Education'];
     if (merged.subject) {
       const matched = VALID_SUBJECTS.find(s => s.toLowerCase() === merged.subject.trim().toLowerCase());
@@ -958,11 +1006,24 @@ router.post('/extract-questions', async (req, res) => {
   }
   if (fileList.length === 0) return res.status(400).json({ error: 'No files provided' });
   try {
-    const merged = await extractWorksheetContent(fileList);
+    const merged = await extractWorksheetContent(fileList, { fileName: req.body.fileName });
     res.json(merged);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── POST /assignments/detect-meta ──────────────────────────────────
+// Grade / curriculum / chapter code from the printed header and the file
+// name, in about a second (no AI) — the upload form fills these right away
+// instead of waiting for the full extraction job.
+router.post('/detect-meta', async (req, res) => {
+  const { fileBase64, mimeType = '', fileName = '' } = req.body || {};
+  if (!fileBase64 && !fileName) return res.status(400).json({ error: 'fileBase64 or fileName required' });
+  const { detectWorksheetMeta } = require('../utils/worksheetMeta');
+  const text = fileBase64 ? await quickDocumentText(Buffer.from(fileBase64, 'base64'), mimeType) : '';
+  const meta = detectWorksheetMeta({ text, fileName });
+  res.json(meta);
 });
 
 // ── POST /assignments/extract-questions-async ──────────────────────
@@ -976,7 +1037,7 @@ router.post('/extract-questions-async', async (req, res) => {
   }
   if (fileList.length === 0) return res.status(400).json({ error: 'No files provided' });
   try {
-    const { jobId } = await publishJob('worksheet_extract', { fileList });
+    const { jobId } = await publishJob('worksheet_extract', { fileList, fileName: req.body.fileName || '' });
     res.json({ jobId });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -3673,3 +3734,4 @@ module.exports = router;
 module.exports.normalizeQuizQuestion = normalizeQuizQuestion;
 module.exports.extractWorksheetContent = extractWorksheetContent;
 module.exports.hostEmbeddedImages = hostEmbeddedImages;
+module.exports.docxToPdf = docxToPdf;

@@ -64,3 +64,65 @@ Ordered by dependency (each increment builds on the previous).
 - **2026-09-12 (Phase 2, continued) — Multi-task completeness re-validated against the REAL 4-task Telugu worksheet fixture** (`b02-ib-pyp-worksheet.pdf`): task-count preservation holds (4 source tasks → 4 generated tasks, titles match exactly), and `findIncompleteTasks` correctly flags all 4 as incomplete (0 questions each) — this worksheet's actual answerable content is blank handwriting lines with no printed sub-items pdf-parse/OCR can read, so 0 generated questions per task is the accurate, non-fabricated representation of what's derivable from text alone, not a completeness-check failure. Separately validated against a synthetic 4-task worksheet mixing a math task, an image-tagged task, a word problem, and a comparison-fraction task (matching the ORIGINAL reported failure pattern — a task with real content coming back empty): all 4 tasks generated fully populated, 0 flagged incomplete, confirming the retry/completeness mechanism still works correctly after all of today's other changes.
 - **2026-09-12 (Phase 2, continued) — Live production E2E verification, real diagram-containing English worksheet** (`area-perimeter-1.png`, via `/quiz/generate-image`): Task 2 (L-shaped polygon, whose side measurements 6m/8m/3m are printed as text labels near the diagram) generated a fully correct answer (28m) with a valid step-by-step solution. Task 1 (values only encoded inside the diagram's graphics, not real OCR-able text) correctly returned `"answer": null` with an honest explanation that the measurements aren't available, rather than fabricating a plausible-looking wrong number — this is the Phase 7 "fail safely rather than generate plausible-looking incorrect content" requirement working as intended under the current infrastructure constraints (no vision model available to read the diagram itself).
 - **2026-09-12 (Phase 2, continued) — Root cause of a real teacher's bug report investigated with actual screenshots** (`bug3.docx`, a tester's annotated bug report — not a source worksheet, but 4 embedded screenshots comparing generated vs. source content): confirmed the fraction-table hallucination fix from earlier today (structuredText) resolves that exact failure. Investigated remaining reported issues: "diagrams did not come" traced to a real architectural gap — with Gemini unfunded, every fallback engine (Groq-text, Qwen-OCR, Tesseract) is 100% text-based, so any non-text visual (diagram, picture, chart) was structurally invisible to generation, not a bug in one code path. **Fix**: mammoth embeds a docx's images as base64 data URIs by default (verified against mammoth's own source — `options.convertImage || images.dataUri`); `docxToPdf` now uploads each embedded image to Cloudinary (`hostEmbeddedImages`, already-integrated Cloudinary account) and `htmlToStructuredText` emits an explicit `[IMAGE: url=...]` marker with the real hosted URL in place of a bare `[IMAGE]` placeholder. The generation prompt (`buildQuizFromWorksheetText`) was extended with explicit instructions to copy that exact URL into `questions[0].imageUrl` — discovered mid-implementation that the renderer (`quizHtmlRenderer.js`) *already* has full, working support for rendering a real `question.imageUrl` (built for the never-ported diagram-extraction pipeline, unused until now) but reads it ONLY from the question object, never the task — an early instruction draft said "task or question" and was corrected before shipping after a real test showed the URL landing on the wrong field and being silently dropped by the renderer. **Live-verified**: a real tiny PNG round-tripped through mammoth→Cloudinary→structuredText→Groq structuring, landing correctly on `questions[0].imageUrl` with zero fabrication, alongside a 4-task synthetic worksheet confirming the image-marker instructions don't interfere with the completeness/retry check (all 4 tasks generated, 0 flagged incomplete). 6 new unit tests (`tests/unit/hostEmbeddedImages.test.js`). Full suite 214/214 passing. **Scope note**: this fixes image preservation for DOCX-sourced worksheets specifically (mammoth already has the image bytes) — a native PDF upload or a scanned/image-only worksheet still has no equivalent fix, since there's no structured source to extract a discrete image asset from short of implementing real diagram-region cropping (the never-ported `diagram-extractor.js` capability) — flagged as a further limitation, not solved this pass.
+
+## 2026-10-13 — provider-agnostic pipeline (RCA + redesign)
+
+### Root cause of "~75% → ~20% of worksheets convert"
+1. **No vision provider in production.** Gemini keeps failing (quota/billing) and
+   Qwen (HF) is out of credits, so every worksheet took the text-only fallback —
+   teachers saw "could not be analyzed without a working vision-capable AI
+   provider" on every task. `GET /quiz/providers` now shows this directly.
+2. **The text fallback could not see the worksheet:**
+   - Word-exported PDFs of Indic scripts have a broken text layer (lost
+     shaping: `సంబంధించిన` → `సింబింధించిన`), and real questions are often
+     pasted screenshots that exist in no text layer at all.
+   - OCR only ran when the text layer had < 300 chars — the Telugu sample has
+     ~1100 chars of headers, so its questions were never read.
+   - When OCR did run it stitched ≤4 pages into one ~108 dpi image, and
+     `Tesseract.detect` (needs the legacy OSD model + a CDN download) failed, so
+     Telugu pages were OCR'd as English.
+   - Pictures were appended as an unordered URL list, so the model couldn't
+     tell which picture belonged to which question.
+3. **Grading accepted anything for keyless questions:** questions with no answer
+   key matching an English "write/sentence…" regex were auto-accepted in any
+   script ("வணக்கம்" on a Telugu sheet), the keyword matcher only knew Latin
+   words, and `/quiz/grade-answer` didn't exist in this service.
+
+### New pipeline (`services/worksheet/`)
+1. **Document model** (`documentModel.js`, no AI) — per page: pdfjs text layer
+   with positions (`pdfLayout.js`), a ~190 dpi render (`rasterize.js`), OCR with
+   bundled offline language packs (`ocrEngine.js`: tel/hin/tam/kan/mal/ben/guj/
+   pan/ori/ara/urd/eng + OSD). The text layer is trusted only for clean Latin
+   text; otherwise OCR is the source, and OCR also fills in text found only
+   inside screenshots. Images are classified (`text` screenshot / `mixed` /
+   `picture` / page `scan` / decorative logo/rule), pictures are hosted and
+   placed inline as `[IMAGE: url=…]` on their row (so "picture | word"
+   matching pairs survive), with words printed inside them read separately
+   (photo areas masked so isolated labels are found).
+2. **Providers in order**, each given the transcript as ground truth: Gemini
+   (whole PDF) → **Mistral vision** (page images, `MISTRAL_API_KEY`) → Groq text.
+3. **Same post-processing** for every provider, plus `regionCrops.js`: a task
+   that needs a picture but has none shows its own region of the page.
+4. **Grading**: `utils/answerCheck.js` (shared by `POST /quiz/grade-answer` and
+   the student page) — wrong-script answers are rejected, answers compared
+   NFC/punctuation-insensitive with `acceptableAnswers`, non-Latin answers are
+   graded exactly then by the server (spelling matters in language sheets),
+   keyless questions are recorded for teacher review.
+
+`node scripts/worksheetDiagnostics.js <files|folder> --out <dir>` prints how each
+page was read and writes the transcript — run it on any worksheet that converts
+badly before touching prompts.
+
+### Measured on the 15 sample worksheets (document model, no AI)
+All 15 produce a positioned transcript. Telugu samples: 0 → all questions
+present (OCR ≥ 73 conf); scanned book (Dory, 12 pp): every page now has text;
+maths sheets: diagrams inline beside their questions with labels (axis values,
+`5m 8m 3m`). End-to-end AI output can't be measured from the dev sandbox (no
+provider keys/network) — verify with real keys after deploy.
+
+### 2026-10-13 follow-up — MHLE-29 feedback and upload auto-fill
+
+- **Invented values in picture tasks (Task 2 fractions, Task 4 table).** Stacked fractions inside pictures are rebuilt from OCR word positions (`pairFractions`); a table drawn as a picture is read cell by cell (`findGridCells`). Without a vision provider the text model may not invent numbers: a value missing from the transcript must be written "?", and any number in a question that the transcript doesn't contain is flagged (`flagUnverifiedNumbers`) → `REQUIRES_REVIEW` in the conversion report.
+- **Missing pictures in the preview.** Pictures are referenced by id (`img://p1-3`) and resolved after generation to the hosted URL, or inline (data URI) when Cloudinary isn't configured; a task left without a picture gets the pictures printed in its own region (`attachRegionPictures`).
+- **Upload form stuck on the teacher's Grade 6 / CBSE, chapter "loading".** The form's only source was the AI extraction job, which returns nothing when Gemini and Qwen are both down; the frontend also never applied the extracted curriculum. New `POST /assignments/detect-meta` reads grade / curriculum / chapter code from the PDF/docx header text and the file name in about a second (`utils/worksheetMeta.js`); extraction now falls back Gemini → Mistral → Qwen → OCR + Groq text, and fills blanks from the same detector.
+- **Test speed.** PNG encoding goes through pngjs with a fixed filter (`pngBuffer`) — Jimp's encoder and pngjs's adaptive filter search were ~10× slower under jest.

@@ -24,7 +24,7 @@ utils/
 ## Why only 6 of the original 19 endpoints
 
 `assignments.js` (3490 lines) mixes teacher-authoring endpoints (AI-generate,
-generate-steps, generate-ibpyp, docx-to-pdf, extract-questions(-async),
+generate-steps, generate-ibpyp, docx-to-pdf, extract-questions(-async), detect-meta,
 pdf-to-quiz, upload-doc, `POST /`, `GET /:id/submissions`,
 `PUT /:id/teacher-feedback`, `DELETE /:id`) with student-completion
 endpoints. The teacher-side ones depend on `routes/quiz.js`'s generation

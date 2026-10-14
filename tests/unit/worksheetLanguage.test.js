@@ -61,7 +61,8 @@ describe('renderQuizHTML — typing answers in any language', () => {
 
   test('answers are compared and saved NFC-normalized, and keyword matching keeps non-Latin letters', () => {
     const html = renderQuizHTML(quiz('అమ్మ'), {});
-    expect(html).toContain("val.normalize('NFC')");
+    expect(html).toContain('ok = matchesAnyAnswer(val, keysOf(a));');
+    expect(html).toContain('function normalizeAnswer(text)');
     expect(html).toContain("data.answer.normalize('NFC')");
     expect(html).toContain('[^\\p{L}\\p{M}\\p{N}\\s]/gu');
     // The page's own script must still parse.
