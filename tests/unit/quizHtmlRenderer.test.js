@@ -170,7 +170,7 @@ describe('solution formatting and explanation questions', () => {
       { id: 'c1', type: 'numeric', question: '5 l = ___ ml', answer: '5000', imageUrl: 'https://cdn.test/capacity.png' },
       { id: 'c2', type: 'numeric', question: '13 l = ___ ml', answer: '13000' },
     ] }] });
-    const rows = html => html.slice(html.indexOf('<table class="ws-table"')).split('<tr').slice(1);
+    const rows = html => html.slice(html.indexOf('<table class="ws-table ws-pair"')).split('<tr').slice(1);
 
     test('two column charts share one equal-height row above the paired question rows', () => {
       const html = renderQuizHTML(conversions({ type: 'two-column', columnGroups: [{ questionIds: ['w1', 'w2'] }, { questionIds: ['c1', 'c2'] }] }), {});
@@ -189,6 +189,27 @@ describe('solution formatting and explanation questions', () => {
       expect(charts).toContain('capacity.png');
       expect(first).toContain('4 kg');
       expect(first).toContain('5 l');
+    });
+
+    test('a side-by-side question keeps its blank, and quantities are not bolded', () => {
+      const [, first] = rows(renderQuizHTML(conversions(undefined), {}));
+      expect(first).toContain('4 kg = ___ gm');
+      expect(first).not.toMatch(/<strong>4 kg/);
+    });
+
+    test('on a phone the paired table is one column: left chart and questions, then right', () => {
+      const html = renderQuizHTML(conversions(undefined), {});
+      expect(html).toMatch(/@media \(max-width: 640px\) \{\s*\.ws-pair, \.ws-pair tbody \{ display:flex; flex-direction:column; \}/);
+      const cells = html.split('<td style="order:').slice(1).map(c => ({ order: parseInt(c, 10), text: c.slice(0, c.indexOf('</td>')) }));
+      const order = text => cells.find(c => c.text.includes(text)).order;
+      expect(order('4 kg')).toBeLessThan(order('3 kg'));
+      expect(order('3 kg')).toBeLessThan(order('5 l'));
+    });
+
+    test('pictures open full screen when tapped', () => {
+      const html = renderQuizHTML(conversions(undefined), {});
+      expect(html).toContain("closest('img.wk-img')");
+      expect(html).toMatch(/\.wk-zoom \{[^}]*position:fixed/);
     });
 
     test('a list with pictures elsewhere stays one column', () => {

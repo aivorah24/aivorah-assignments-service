@@ -769,10 +769,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     let s = escapeHtml(text);
     // "28/50" → stacked, as printed on the worksheet (not dates like 13/03/2026).
     s = s.replace(/(^|[^\d/])(\d{1,4})\/(\d{1,4})(?![\d/])/g, '$1<span class="frac"><span>$2</span><span>$3</span></span>');
-    // Bold numbers with units: "65 m", "450 m", "200 m", "40 cm", etc.
-    s = s.replace(/(\d+(?:\.\d+)?)\s*(m²|cm²|km|m|cm|mm|kg|g|mg|kL|L|mL|tiles|degrees|rounds)\b/g, '<strong>$1 $2</strong>');
-    // Bold key action words
-    s = s.replace(/\b(four times|five rounds|three times|twice|double[sd]?)\b/gi, '<strong>$1</strong>');
+    // Only the worksheet's own bold (markdown) — no automatic bolding of
+    // quantities, which bolded "4 kg" but not "5 l" beside it.
     // Apply markdown bold
     s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     return s;
@@ -1157,7 +1155,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     const isMcq = q.type === 'mcq' && Array.isArray(q.options);
 
     // Extract the "blank" part from the question: "4 kg = ___ gm" → show "4 kg =" with input and "gm"
-    const questionText = (q.question || '').replace(/___+/g, '').replace(/=\s*$/, '=').trim();
+    // The blank stays where the worksheet prints it ("4 kg = ___ gm").
+    const questionText = (q.question || '').trim();
 
     let html = '';
 
@@ -1570,7 +1569,11 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       const leftQIds = leftQuestions.map(q => registerQuestion(q));
       const rightQIds = rightQuestions.map(q => registerQuestion(q));
 
-      tasksHTML += `<table class="ws-table" style="width:100%;border-collapse:collapse;border:1px solid rgba(195,220,216,0.2);border-radius:8px;overflow:hidden;">`;
+      tasksHTML += `<table class="ws-table ws-pair" style="width:100%;border-collapse:collapse;border:1px solid rgba(195,220,216,0.2);border-radius:8px;overflow:hidden;">`;
+      // On a phone the table becomes one column: the whole left column (its
+      // chart, then its questions), then the whole right one — "order" is
+      // ignored while it is a table.
+      const phoneOrder = (col, r) => `order:${col * 1000 + r + 1};`;
 
       // Each column's chart (on its first question) goes in one row of its own,
       // both pictures the same height, so the question rows below pair up
@@ -1578,8 +1581,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       const heads = [leftQuestions[0], rightQuestions[0]].map(q => (q && q.imageUrl && !q._sharedImage ? q : null));
       if (heads.some(Boolean)) {
         tasksHTML += `<tr class="ws-chart-row">`;
-        for (const q of heads) {
-          tasksHTML += `<td style="width:50%;vertical-align:middle;text-align:center;border:1px solid rgba(195,220,216,0.15);padding:10px;">`;
+        for (const [col, q] of heads.entries()) {
+          tasksHTML += `<td style="${phoneOrder(col, -1)}width:50%;vertical-align:middle;text-align:center;border:1px solid rgba(195,220,216,0.15);padding:10px;">`;
           if (q) {
             tasksHTML += `<img class="wk-img ws-chart" onerror="wkImgError(this)" src="${embedImage(q.imageUrl)}" alt="${escAttr(q.diagramDescription || 'Diagram')}">`;
             q._sharedImage = true;
@@ -1593,13 +1596,13 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       for (let r = 0; r < maxRows; r++) {
         tasksHTML += `<tr>`;
         // Left cell
-        tasksHTML += `<td style="width:50%;vertical-align:top;border:1px solid rgba(195,220,216,0.15);">`;
+        tasksHTML += `<td style="${phoneOrder(0, r)}width:50%;vertical-align:top;border:1px solid rgba(195,220,216,0.15);">`;
         if (r < leftQuestions.length) {
           tasksHTML += renderQuestionCell(leftQuestions[r], leftQIds[r], true);
         }
         tasksHTML += `</td>`;
         // Right cell
-        tasksHTML += `<td style="width:50%;vertical-align:top;border:1px solid rgba(195,220,216,0.15);">`;
+        tasksHTML += `<td style="${phoneOrder(1, r)}width:50%;vertical-align:top;border:1px solid rgba(195,220,216,0.15);">`;
         if (r < rightQuestions.length) {
           tasksHTML += renderQuestionCell(rightQuestions[r], rightQIds[r], true);
         }
@@ -1803,6 +1806,9 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     .wk-img { display:block; box-sizing:border-box; width:auto; height:auto; max-width:100%; max-height:420px;
       object-fit:contain; margin:0 auto; background:#fff; padding:8px; border-radius:8px; border:1px solid rgba(195,220,216,0.2); }
     .ws-chart { height:220px; max-height:220px; }
+    .wk-img { cursor:zoom-in; }
+    .wk-zoom { position:fixed; inset:0; z-index:1000; background:rgba(0,0,0,0.88); display:flex; align-items:center; justify-content:center; padding:12px; cursor:zoom-out; }
+    .wk-zoom img { width:100%; height:100%; object-fit:contain; touch-action:pinch-zoom; }
     .wk-img-missing { font-size:12px; color:#A8B5B3; padding:8px 12px; border:1px dashed rgba(195,220,216,0.25); border-radius:8px; }
     @media (max-width: 520px) { .q-image-indent { margin-left:0 !important; } }
     .match-img-text { background:rgba(255,255,255,0.05); color:#F0EEEC; font-size:13px; padding:12px; }
@@ -1825,6 +1831,10 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
     /* ── Responsive ── */
     @media (max-width: 640px) {
+      .ws-pair, .ws-pair tbody { display:flex; flex-direction:column; }
+      .ws-pair tr { display:contents; }
+      .ws-pair td { display:block; width:100% !important; }
+      .ws-pair td:empty { display:none; }
       .header { padding: 12px 76px 12px 16px; }
       .header h1 { font-size: 20px; }
       .header-logos img { height: 40px; }
@@ -2683,6 +2693,25 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       });
     })();
     ` : ''}
+  </script>
+  <script>
+    // Tap a worksheet picture to see it full screen; tap again (or Esc) to close.
+    (function() {
+      var overlay = null;
+      function close() { if (overlay) { overlay.remove(); overlay = null; } }
+      document.addEventListener('click', function(e) {
+        var img = e.target.closest && e.target.closest('img.wk-img');
+        if (overlay) { close(); return; }
+        if (!img || !img.src) return;
+        overlay = document.createElement('div');
+        overlay.className = 'wk-zoom';
+        var big = document.createElement('img');
+        big.src = img.src; big.alt = img.alt || '';
+        overlay.appendChild(big);
+        document.body.appendChild(overlay);
+      });
+      document.addEventListener('keydown', function(e) { if (e.key === 'Escape') close(); });
+    })();
   </script>
 </body>
 </html>`;
