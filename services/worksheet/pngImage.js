@@ -204,4 +204,74 @@ function findFractionBars(img) {
   return { bars: bars.filter(b => Math.min(b.num.h, b.den.h) >= typical * 0.6), boxes };
 }
 
-module.exports = { jimpFromPng, pngBuffer, isPng, isJpeg, isDecodable, maskPhotos, findGridCells, findFractionBars };
+// Skew of a photographed page, in degrees (rotate by the negative to
+// straighten). Text rows give the sharpest horizontal ink profile when level:
+// the angle whose row histogram has the highest variance wins.
+function estimateSkew(img, { maxDeg = 6 } = {}) {
+  const small = img.clone();
+  if (small.bitmap.width > 700) small.resize({ w: 700 });
+  const { width: W, height: H, data: d } = small.bitmap;
+  const dark = (x, y) => { const o = (y * W + x) * 4; return (d[o] + d[o + 1] + d[o + 2]) / 3 < 110; };
+  // Only text-like ink: blocks mostly dark (the table the sheet lies on, a
+  // photo, a filled shape) are left out — their edges would decide the angle.
+  const B = 12; const bw = Math.ceil(W / B);
+  const solid = new Uint8Array(bw * Math.ceil(H / B));
+  for (let by = 0; by * B < H; by++) {
+    for (let bx = 0; bx * B < W; bx++) {
+      let n = 0; let all = 0;
+      for (let y = by * B; y < Math.min(H, (by + 1) * B); y++) for (let x = bx * B; x < Math.min(W, (bx + 1) * B); x++) { all++; if (dark(x, y)) n++; }
+      solid[by * bw + bx] = n / all > 0.45 ? 1 : 0;
+    }
+  }
+  const nearSolid = (x, y) => {
+    const bx = Math.floor(x / B); const by = Math.floor(y / B);
+    for (let j = by - 1; j <= by + 1; j++) for (let i = bx - 1; i <= bx + 1; i++) if (i >= 0 && j >= 0 && i < bw && solid[j * bw + i]) return true;
+    return false;
+  };
+  const xs = []; const ys = [];
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (dark(x, y) && !nearSolid(x, y)) { xs.push(x - W / 2); ys.push(y); }
+    }
+  }
+  if (xs.length < 200) return 0;
+  const sharpness = (deg) => {
+    const t = Math.tan(deg * Math.PI / 180);
+    const bins = new Float64Array(H + W);
+    const off = W / 2;
+    for (let i = 0; i < xs.length; i++) bins[Math.round(ys[i] - xs[i] * t + off)]++;
+    let sum = 0; let sq = 0;
+    for (const v of bins) { sum += v; sq += v * v; }
+    return sq / bins.length - (sum / bins.length) ** 2;
+  };
+  let best = 0; let bestScore = sharpness(0);
+  for (let deg = -maxDeg; deg <= maxDeg; deg += 0.5) {
+    const sc = sharpness(deg);
+    if (sc > bestScore) { best = deg; bestScore = sc; }
+  }
+  for (let deg = best - 0.4; deg <= best + 0.4; deg += 0.1) {
+    const sc = sharpness(deg);
+    if (sc > bestScore) { best = deg; bestScore = sc; }
+  }
+  return Math.round(best * 10) / 10;
+}
+
+// A photo straightened (white fill), or the same buffer when it is level.
+function straighten(buffer) {
+  if (!isDecodable(buffer)) return buffer;
+  const img = jimpFromPng(buffer);
+  const skew = estimateSkew(img);
+  if (Math.abs(skew) < 0.3) return buffer;
+  const { width: W, height: H } = img.bitmap;
+  const { Jimp } = require('jimp');
+  const canvas = new Jimp({ width: W, height: H, color: 0xffffffff });
+  img.rotate({ deg: skew, mode: true });
+  // rotate() grows the canvas; keep the original size, centred.
+  canvas.composite(img, Math.round((W - img.bitmap.width) / 2), Math.round((H - img.bitmap.height) / 2));
+  // Corners uncovered by the rotation come out transparent/black: paint white.
+  const d = canvas.bitmap.data;
+  for (let o = 0; o < d.length; o += 4) if (d[o + 3] < 255) { d[o] = 255; d[o + 1] = 255; d[o + 2] = 255; d[o + 3] = 255; }
+  return pngBuffer(canvas);
+}
+
+module.exports = { jimpFromPng, pngBuffer, isPng, isJpeg, isDecodable, maskPhotos, findGridCells, findFractionBars, estimateSkew, straighten };

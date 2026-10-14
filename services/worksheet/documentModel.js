@@ -348,7 +348,10 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     if (ocrEnabled && layout.pages.length) rasters = await safe('rasterize', () => rasterizePdfPages(buffer, { maxPages }), []);
     if (layout.numPages > maxPages) diagnostics.warnings.push(`Only the first ${maxPages} of ${layout.numPages} pages were read.`);
   } else if (ocr.isDecodableImage(buffer)) {
-    rasters = [{ page: 1, buffer, width: 0, height: 0, scale: 1 }];
+    // A phone photo is rarely level: straighten it first (OCR reads tilted
+    // lines of Indic script poorly, and the picture crops come out level too).
+    const level = await safe('straighten photo', () => require('./pngImage').straighten(buffer), buffer);
+    rasters = [{ page: 1, buffer: level, width: 0, height: 0, scale: 1 }];
     layout.pages = [{ page: 1, width: 0, height: 0, lines: [], images: [] }];
   }
   const pageCount = Math.max(layout.pages.length, rasters.length);
@@ -360,8 +363,8 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     ...ocr.scriptsFromHints(hints),
   ]);
   if (ocrEnabled && rasters.length && !scripts.size) {
-    // Nothing tells us the language (scan/photo): ask Tesseract's script detector.
-    const detected = await safe('script detection', () => ocr.detectScript(rasters[0].buffer), null);
+    // Nothing tells us the language (scan/photo): detect it from the page.
+    const detected = await safe('script detection', () => ocr.pickScript(rasters[0].buffer), null);
     if (detected && detected !== 'Latin') scripts.add(detected);
   }
   const langs = ocr.langsForScripts([...scripts]);

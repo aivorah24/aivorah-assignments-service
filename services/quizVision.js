@@ -1319,8 +1319,8 @@ function looksLikeDecodableImage(buffer) {
 // so it failed and every page was OCR'd as English.
 async function detectScriptLang(imageBuffer) {
   if (!looksLikeDecodableImage(imageBuffer)) return 'eng';
-  const { detectScript } = require('./worksheet/ocrEngine');
-  const script = await detectScript(imageBuffer);
+  const { pickScript } = require('./worksheet/ocrEngine');
+  const script = await pickScript(imageBuffer);
   return TESSERACT_SCRIPT_TO_LANG[script] || 'eng';
 }
 

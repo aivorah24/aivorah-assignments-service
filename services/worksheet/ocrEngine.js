@@ -187,7 +187,40 @@ async function ocrImage(imageBuffer, langs = ['eng'], { sparse = false, digits =
   });
 }
 
+// OSD alone mistakes Telugu photos for Arabic (and is unsure on many phone
+// photos). So its guess is checked by reading a band of the page in that
+// script and in English; when neither reads confidently, every script is
+// tried and the one Tesseract reads with the highest confidence wins (a
+// Telugu sheet reads at ~70 in Telugu, ≤45 in any other script).
+const CONFIDENT = 58;
+async function pickScript(imageBuffer) {
+  if (!isDecodableImage(imageBuffer)) return null;
+  const { jimpFromPng, pngBuffer, isDecodable } = require('./pngImage');
+  let sample = imageBuffer;
+  if (isDecodable(imageBuffer)) {
+    const img = jimpFromPng(imageBuffer);
+    const { width: W, height: H } = img.bitmap;
+    img.crop({ x: 0, y: Math.round(H * 0.2), w: W, h: Math.max(1, Math.round(H * 0.4)) });
+    if (img.bitmap.width > 1000) img.resize({ w: 1000 });
+    sample = pngBuffer(img);
+  }
+  const scores = new Map();
+  const score = async (script) => {
+    if (!scores.has(script)) {
+      try { scores.set(script, (await ocrImage(sample, SCRIPT_TO_LANGS[script].slice(0, 1))).confidence); } catch { scores.set(script, 0); }
+    }
+    return scores.get(script);
+  };
+  const guess = await detectScript(imageBuffer);
+  const first = [...new Set([guess || 'Latin', 'Latin'])];
+  for (const sc of first) await score(sc);
+  const best = () => [...scores.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (best()[1] < CONFIDENT) for (const sc of Object.keys(SCRIPT_TO_LANGS)) await score(sc);
+  const [script, conf] = best();
+  return conf >= 40 ? script : guess;
+}
+
 module.exports = {
-  ocrImage, detectScript, terminateWorkers, scriptsInText, scriptsFromHints, langsForScripts,
+  ocrImage, detectScript, pickScript, terminateWorkers, scriptsInText, scriptsFromHints, langsForScripts,
   isDecodableImage, SCRIPT_TO_LANGS,
 };

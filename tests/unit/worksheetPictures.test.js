@@ -3,7 +3,7 @@
 jest.mock('../../services/supabase', () => ({ from: jest.fn() }));
 const { Jimp } = require('jimp');
 const { pairFractions, readingOrder } = require('../../services/worksheet/documentModel');
-const { findGridCells, findFractionBars } = require('../../services/worksheet/pngImage');
+const { findGridCells, findFractionBars, estimateSkew, straighten, jimpFromPng, pngBuffer } = require('../../services/worksheet/pngImage');
 const { resolvePictureRefs, attachRegionPictures, dropTextOnlyPictures } = require('../../services/worksheet/regionCrops');
 const { renderQuizHTML } = require('../../utils/quizHtmlRenderer');
 const { flagUnverifiedNumbers, buildConversionReport } = require('../../services/quizVision');
@@ -61,6 +61,29 @@ describe('findFractionBars', () => {
     const u = new Jimp({ width: 100, height: 60, color: 0xffffffff });
     rect(u, 20, 10, 60, 30); rect(u, 18, 34, 62, 35);
     expect(findFractionBars(u).bars).toEqual([]);
+  });
+});
+
+describe('estimateSkew / straighten', () => {
+  // Lines of "text" (short dashes with gaps) on a page lying on a dark table.
+  const page = () => {
+    const img = new Jimp({ width: 600, height: 500, color: 0x000000ff });
+    for (let y = 40; y < 460; y++) for (let x = 40; x < 560; x++) img.setPixelColor(0xffffffff, x, y);
+    for (let y = 80; y < 420; y += 24) for (let x = 70; x < 530; x += 14) for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 9; dx++) img.setPixelColor(0x000000ff, x + dx, y + dy);
+    return img;
+  };
+
+  test('a level page reads 0°; a tilted one reads its tilt, despite the dark table', () => {
+    expect(Math.abs(estimateSkew(page()))).toBeLessThan(0.3);
+    const tilted = page(); tilted.rotate({ deg: 2, mode: true });
+    expect(Math.abs(Math.abs(estimateSkew(tilted)) - 2)).toBeLessThanOrEqual(0.3);
+  });
+
+  test('straighten levels a tilted photo and leaves a level one untouched', () => {
+    const tilted = page(); tilted.rotate({ deg: -2.5, mode: true });
+    expect(Math.abs(estimateSkew(jimpFromPng(straighten(pngBuffer(tilted)))))).toBeLessThanOrEqual(0.3);
+    const level = pngBuffer(page());
+    expect(straighten(level)).toBe(level);
   });
 });
 
