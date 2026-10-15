@@ -148,14 +148,9 @@ async function docxToPdf(buffer) {
   const browser = await launchBrowser();
   try {
     const page = await browser.newPage();
-    // Puppeteer's default navigation timeout is 30s, and mammoth embeds
-    // images as base64 data URIs - which Chromium's network stack still
-    // counts as in-flight requests for networkidle0 purposes. A doc with
-    // several images (e.g. a vocabulary/flashcard worksheet) can
-    // legitimately take longer than 30s to settle, hard-failing the whole
-    // conversion with "Navigation timeout of 30000 ms exceeded" even
-    // though nothing is actually broken - just needs more time.
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 90000 });
+    // Content is fully inline (data: URI images), so 'load' is enough;
+    // networkidle0 never settled on Render and hit the timeout.
+    await page.setContent(html, { waitUntil: 'load', timeout: 60000 });
     const pdf = await page.pdf({ format: 'A4', printBackground: true });
     return { pdfBuf: Buffer.from(pdf), structuredText };
   } finally {
@@ -184,7 +179,8 @@ async function fetchBranding(school, curriculum) {
     if (school)     kinds.push('school');
     if (curriculum) kinds.push('curriculum');
     if (kinds.length === 0) return { schoolLogoUrl: null, curriculumLogoUrl: null };
-    const { data } = await supabase.from('branding_logos').select('kind, name, logo_url').in('kind', kinds);
+    const { data } = await supabase.from('branding_logos').select('kind, name, logo_url, updated_at').in('kind', kinds);
+    data?.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
     // Case/whitespace-insensitive match so casing/spacing drift in a teacher's
     // school name ("The shri ram academy") still resolves the logo.
     const norm = s => String(s || '').trim().toLowerCase();

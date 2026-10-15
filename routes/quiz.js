@@ -36,7 +36,8 @@ async function fetchBranding(school, curriculum) {
     if (school)     kinds.push('school');
     if (curriculum) kinds.push('curriculum');
     if (kinds.length === 0) return { schoolLogoUrl: null, curriculumLogoUrl: null };
-    const { data } = await supabase.from('branding_logos').select('kind, name, logo_url').in('kind', kinds);
+    const { data } = await supabase.from('branding_logos').select('kind, name, logo_url, updated_at').in('kind', kinds);
+    data?.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
     const norm = s => String(s || '').trim().toLowerCase();
     const schoolLogoUrl     = (data || []).find(r => r.kind === 'school' && norm(r.name) === norm(school))?.logo_url || null;
     const curriculumLogoUrl = (data || []).find(r => r.kind === 'curriculum' && norm(r.name) === norm(curriculum))?.logo_url || null;
