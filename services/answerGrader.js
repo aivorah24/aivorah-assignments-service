@@ -5,14 +5,29 @@
 // caller decides what "can't tell" means, never a silent "wrong".
 const { dominantScript } = require('../utils/answerCheck');
 
-async function gradeAnswerMeaning({ expected, student, question = '', acceptableAnswers = [] }) {
+// Writing system → language name. "Latin" must never reach the model as a
+// language: it is the A–Z alphabet (English), and the model used to reply in
+// Latin ("Bene tentasti…").
+const SCRIPT_LANGUAGES = {
+  Latin: 'English', Devanagari: 'Hindi', Telugu: 'Telugu', Tamil: 'Tamil', Kannada: 'Kannada',
+  Malayalam: 'Malayalam', Bengali: 'Bengali', Gujarati: 'Gujarati', Gurmukhi: 'Punjabi', Oriya: 'Odia',
+  Arabic: 'Urdu', Han: 'Chinese', Kana: 'Japanese', Hangul: 'Korean', Cyrillic: 'Russian', Greek: 'Greek',
+};
+
+// The worksheet's language when known (a French worksheet is also A–Z),
+// else the language of the answer key's writing system.
+function answerLanguage(language, expected) {
+  return String(language || '').trim() || SCRIPT_LANGUAGES[dominantScript(expected)] || 'English';
+}
+
+async function gradeAnswerMeaning({ expected, student, question = '', acceptableAnswers = [], language = '' }) {
   const keys = [expected, ...acceptableAnswers].map(String).filter(k => k.trim());
+  const lang = answerLanguage(language, expected);
   const prompt = `You grade a primary-school student's answer. Judge MEANING, not spelling of minor words.
 Rules:
-- "correct": same meaning as the expected answer (a paraphrase or a shorter form that still answers the question is fine).
-- "partial": partly right (one of two required parts, or the right idea with a factual slip).
-- "incorrect": wrong, off-topic, empty of meaning, or in a different language than the expected answer. Expected answer language/script: ${dominantScript(expected) || 'any'}.
-Return JSON: {"verdict":"correct|partial|incorrect","reason":"one short, kind sentence for the student, in the language of the expected answer"}.
+- "correct": the same meaning as the expected answer AND complete — every part it asks for is there (both words of a two-word answer, every item of a list). Other wording, a synonym or a small spelling slip is fine.
+- "incorrect": anything else — wrong, off-topic, only part of the answer (e.g. "seller" when the answer is "buyer and seller"), a word that is not in the answer ("consumer"), or a different language than the expected answer. Expected answer language: ${lang}.
+Return JSON: {"verdict":"correct|incorrect","reason":"one short, kind sentence for the student, written in ${lang}: for an incorrect answer say what is missing or wrong, without giving the answer away"}.
 
 Question: ${String(question).slice(0, 600)}
 Expected answer: ${String(expected).slice(0, 1000)}
@@ -32,7 +47,8 @@ ${keys.length > 1 ? `Also acceptable: ${keys.slice(1).join(' / ').slice(0, 600)}
     raw = result.response.text();
   }
   const parsed = JSON.parse(String(raw).match(/\{[\s\S]*\}/)?.[0] || raw);
-  const verdict = ['correct', 'partial', 'incorrect'].includes(parsed.verdict) ? parsed.verdict : 'incorrect';
+  // Only a complete, correct answer counts; anything else (an old "partial" too) is wrong.
+  const verdict = parsed.verdict === 'correct' ? 'correct' : 'incorrect';
   return { verdict, reason: String(parsed.reason || '').slice(0, 300) };
 }
 
@@ -42,4 +58,4 @@ function isWordAnswer(expected) {
   return /\p{L}/u.test(String(expected)) && !/\d|[<>=≤≥≠]/.test(String(expected));
 }
 
-module.exports = { gradeAnswerMeaning, isWordAnswer };
+module.exports = { gradeAnswerMeaning, isWordAnswer, answerLanguage };

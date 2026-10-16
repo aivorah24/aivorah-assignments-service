@@ -62,12 +62,35 @@ describe('POST /quiz/grade-answer', () => {
   });
 
   test('otherwise the model judges meaning, told the expected script', async () => {
-    mockGroq.mockResolvedValue(groqReply({ verdict: 'partial', reason: 'సరస్సు సరైనదే' }));
+    mockGroq.mockResolvedValue(groqReply({ verdict: 'correct', reason: 'సరస్సు సరైనదే' }));
     const res = await grade({ expected: 'సరస్సు వద్దకు', student: 'సరస్సుకు', question: 'రాణి, తాత ఎక్కడికి వెళ్ళారు?' });
-    expect(res.body).toEqual({ verdict: 'partial', reason: 'సరస్సు సరైనదే' });
+    expect(res.body).toEqual({ verdict: 'correct', reason: 'సరస్సు సరైనదే' });
     const prompt = mockGroq.mock.calls[0][0].messages[0].content;
-    expect(prompt).toContain('Expected answer language/script: Telugu');
+    expect(prompt).toContain('Expected answer language: Telugu');
+    expect(prompt).toContain('written in Telugu');
     expect(prompt).toContain('Student answer: సరస్సుకు');
+  });
+
+  test('the feedback language is named, never "Latin" (the A–Z alphabet made the model reply in Latin)', async () => {
+    mockGroq.mockResolvedValue(groqReply({ verdict: 'partial', reason: 'Good try!' }));
+    await grade({ expected: 'buyer, seller', student: 'consumer', question: 'People (Who is involved?)' });
+    const prompt = mockGroq.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain('written in English');
+    expect(prompt).not.toMatch(/Latin/);
+  });
+
+  test('only a complete answer is correct: "seller" for "buyer and seller" is incorrect, never "partial"', async () => {
+    mockGroq.mockResolvedValue(groqReply({ verdict: 'partial', reason: 'You named one of the two people.' }));
+    const res = await grade({ expected: 'buyer and seller', student: 'seller', question: 'People (Who is involved?)' });
+    expect(res.body.verdict).toBe('incorrect');
+    expect(res.body.reason).toBe('You named one of the two people.');
+    expect(mockGroq.mock.calls[0][0].messages[0].content).toMatch(/only part of the answer/);
+  });
+
+  test('the worksheet language from the page wins (a French worksheet is also A–Z)', async () => {
+    mockGroq.mockResolvedValue(groqReply({ verdict: 'incorrect', reason: 'Non.' }));
+    await grade({ expected: 'le marché', student: 'la maison', language: 'French' });
+    expect(mockGroq.mock.calls[0][0].messages[0].content).toContain('written in French');
   });
 
   test('Groq down: Gemini judges instead, so a right answer in other words still passes', async () => {

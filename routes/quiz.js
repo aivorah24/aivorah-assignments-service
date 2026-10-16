@@ -60,13 +60,13 @@ router.get('/providers', async (req, res) => {
 });
 
 // POST /quiz/grade-answer { expected, student, question?, acceptableAnswers?, worksheetScript? }
-// → { verdict: 'correct' | 'partial' | 'incorrect', reason }
+// → { verdict: 'correct' | 'incorrect', reason }
 // Called by the student worksheet page when its instant checks can't decide.
 // Deterministic checks first: an answer in the wrong writing system (Tamil on
 // a Telugu worksheet) is never "correct", whatever the model says.
 router.post('/grade-answer', express.json({ limit: '64kb' }), async (req, res) => {
   const { requiredScript, isWrongScript, matchesAnyAnswer } = require('../utils/answerCheck');
-  const { expected = '', student = '', question = '', acceptableAnswers = [], worksheetScript = '' } = req.body || {};
+  const { expected = '', student = '', question = '', acceptableAnswers = [], worksheetScript = '', language = '' } = req.body || {};
   const studentText = String(student).slice(0, 2000);
   if (!studentText.trim()) return res.status(400).json({ error: 'student answer required' });
   const keys = [expected, ...(Array.isArray(acceptableAnswers) ? acceptableAnswers : [])].map(String);
@@ -77,7 +77,7 @@ router.post('/grade-answer', express.json({ limit: '64kb' }), async (req, res) =
   if (!String(expected).trim()) return res.json({ verdict: 'incorrect', reason: '' }); // nothing to judge against
   try {
     const { gradeAnswerMeaning } = require('../services/answerGrader');
-    res.json(await gradeAnswerMeaning({ expected, student: studentText, question, acceptableAnswers: keys.slice(1) }));
+    res.json(await gradeAnswerMeaning({ expected, student: studentText, question, acceptableAnswers: keys.slice(1), language }));
   } catch (err) {
     console.warn('[quiz/grade-answer] grading failed:', err.message);
     res.status(503).json({ verdict: 'incorrect', reason: '', error: 'grading unavailable' });

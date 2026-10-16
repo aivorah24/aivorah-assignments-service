@@ -612,6 +612,21 @@ function resolveQuizLanguage(quiz) {
   return 'en';
 }
 
+// Header text. The teacher's curriculum is shown as text (a curriculum logo
+// only appears when one is uploaded). A worksheet's own level label
+// ("PYP: 4", "Grade 4") is not part of its title — the grade is shown above
+// it. A subject read together with the next label ("Language Purpose: …")
+// keeps only the subject.
+function headerTitle(title) {
+  const t = String(title || '').trim();
+  const stripped = t.replace(/^(?:pyp|myp|dp|grade|class|std\.?|standard|year|kg)\s*[:\-]?\s*\d+\s*[:\-–·|]?\s*/i, '');
+  return stripped || t || 'Interactive Quiz';
+}
+function headerSubject(subject) {
+  const s = String(subject || '').split(/\s+(?=(?:purpose|learning\s*outcomes?|learning\s*objectives?|topic|grade|class)\s*[:\-])/i)[0].trim();
+  return s || 'Mathematics';
+}
+
 function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || '' } = {}) {
   normalizeVennQuestions(quiz);
   normalizeCharts(quiz);
@@ -863,8 +878,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     // multi-line working + reasoning (e.g. "203 - 057 ----- 146"), never a single
     // exact string, so exact/numeric matching would wrongly reject a correct
     // working. With an answer key they take the theory path below (keywords, then
-    // the AI meaning check, with partial credit) — only a correct answer is
-    // accepted. Without a key there is nothing to check against: open-ended.
+    // the AI meaning check) — only a complete, correct answer is accepted. Without a key there is nothing to check against: open-ended.
     const isExplanatory = /\b(identify the mistake|what went wrong|correct working|explain|justify|show your (thinking|working)|give (a )?reasons?|describe (how|why)|find the error)\b/i.test(q.question || '');
 
     if (isMcq) {
@@ -1361,6 +1375,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     <div class="task-block" style="border-left:5px solid ${s.border}; background:${s.bg}; border-radius:12px; padding:20px 24px; margin:28px 0;">
       ${task.tier ? `<span class="tier-badge" style="display:inline-block;background:${s.labelBg};color:${s.label};font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;padding:4px 12px;border-radius:4px;margin-bottom:6px;">${task.tier}</span>` : ''}
       <h2 style="font-size:18px;color:${s.label};margin:6px 0 18px;font-weight:700;">${taskTitle}</h2>
+      ${task.instructions ? `<div class="task-instructions" style="margin:-8px 0 16px;font-size:14px;color:#D8E8E6;line-height:1.6;">${fmt(task.instructions)}</div>` : ''}
       ${task.passage ? `<div style="margin:0 0 20px;padding:16px 20px;background:rgba(255,255,255,0.04);border:1px solid rgba(217,201,160,0.2);border-radius:10px;font-size:14px;color:#D8E8E6;line-height:1.8;">${fmt(task.passage)}</div>` : ''}
       ${task.example ? `<div class="task-example" style="margin:0 0 20px;padding:10px 14px;background:rgba(217,201,160,0.07);border-left:3px solid rgba(217,201,160,0.4);border-radius:0 8px 8px 0;font-size:13px;color:#A8B5B3;"><strong style="color:#D9C9A0;">Example:</strong> ${fmtQuestion(task.example)}</div>` : ''}`;
 
@@ -1812,9 +1827,9 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 <body>
   <div class="header">
     <div class="header-text">
-      <div class="header-sub">${quiz.school || 'Aivorah'} &middot; ${quiz.grade || ''}</div>
-      <h1>${fmt(quiz.title || 'Interactive Quiz')}</h1>
-      <div class="header-meta">Subject: ${quiz.subject || 'Mathematics'} &nbsp;|&nbsp; Powered by Aivorah</div>
+      <div class="header-sub">${[quiz.school || 'Aivorah', quiz.curriculum, quiz.grade].filter(Boolean).map(fmt).join(' &middot; ')}</div>
+      <h1>${fmt(headerTitle(quiz.title))}</h1>
+      <div class="header-meta">Subject: ${fmt(headerSubject(quiz.subject))} &nbsp;|&nbsp; Powered by Aivorah</div>
     </div>
     ${(branding.schoolLogoUrl || branding.curriculumLogoUrl) ? `<div class="header-logos">
       ${branding.schoolLogoUrl ? `<img src="${branding.schoolLogoUrl}" alt="School logo">` : ''}
@@ -1878,6 +1893,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     ${normalizeAnswer.toString()}
     ${matchesAnyAnswer.toString()}
     const WORKSHEET_SCRIPT = ${JSON.stringify(worksheetScript)};
+    // Language the AI check writes its feedback in (and expects answers in).
+    const WORKSHEET_LANGUAGE = ${JSON.stringify(String(quiz.language || '')).replace(/</g, '\\u003c')};
     const SCRIPT_NAMES = { Devanagari: 'Hindi (Devanagari)', Han: 'Chinese', Kana: 'Japanese', Hangul: 'Korean', Oriya: 'Odia', Gurmukhi: 'Punjabi (Gurmukhi)' };
     // Server feedback text → safe HTML (escaped, **bold** kept).
     function fmt(t) {
@@ -1905,11 +1922,9 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     // reveal the Show Answer before getting it right (that's reading, not solving). ──
     const hintUsed = new Set();
     const revealed = new Set();
-    const semanticCredit = new Map(); // qId -> fraction, set when Tier 2 grading returns "partial"
     function creditFor(id) {
       if (revealed.has(id)) return 0;
-      const base = hintUsed.has(id) ? 0.5 : 1;
-      return semanticCredit.has(id) ? Math.min(base, semanticCredit.get(id)) : base;
+      return hintUsed.has(id) ? 0.5 : 1;
     }
 
     // ── Theory/short-factual answer matching — compares meaningful keywords instead
@@ -1953,7 +1968,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // no extra item ("Paris and London"), no number the answer key doesn't have.
       // One shared keyword used to be enough, so "not Paris" and a bare "Yes" for an
       // explain question were marked correct. A right answer in other words goes on
-      // to the AI meaning check, which can also give part credit.
+      // to the AI meaning check.
       const missing = expected.some(function(w) { return !studentWords.some(function(x) { return sameWord(x, w); }); });
       const extra = studentWords.some(function(x) {
         if (FILLER.has(x)) return false;
@@ -2098,8 +2113,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           return;
         }
         // Tier 1 says wrong — ask Tier 2 before finalizing, in case it's a
-        // valid (or partially valid) paraphrase Tier 1's keyword overlap
-        // couldn't recognize. Three-way verdict: correct / partial / incorrect.
+        // right answer in words Tier 1's keyword check couldn't recognize.
+        // Verdict: correct / incorrect (a partial answer is incorrect).
         r.innerHTML = '<span style="color:#A8B5B3;font-weight:600">Checking...</span>';
         let semanticResult = null;
         try {
@@ -2107,7 +2122,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           const qText0 = qEl0 ? (qEl0.querySelector('.q-label, strong')?.textContent || '') : '';
           const gRes = await fetch(API_BASE + '/quiz/grade-answer', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ expected: String(a.answer), student: val, question: qText0, acceptableAnswers: a.alts || [], worksheetScript: WORKSHEET_SCRIPT }),
+            body: JSON.stringify({ expected: String(a.answer), student: val, question: qText0, acceptableAnswers: a.alts || [], worksheetScript: WORKSHEET_SCRIPT, language: WORKSHEET_LANGUAGE }),
           });
           if (gRes.ok) semanticResult = await gRes.json();
         } catch (e) { /* network hiccup — handled below */ }
@@ -2122,8 +2137,10 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           up();
           return;
         }
-        const verdict = semanticResult.verdict || 'incorrect';
-        studentAnswers[id] = { answer: val, correct: verdict !== 'incorrect', partial: verdict === 'partial', timeSpent: elapsedTh, question: '' };
+        // Only a complete, correct answer counts — "seller" alone for "buyer and
+        // seller" is wrong, not half right.
+        const verdict = semanticResult.verdict === 'correct' ? 'correct' : 'incorrect';
+        studentAnswers[id] = { answer: val, correct: verdict === 'correct', timeSpent: elapsedTh, question: '' };
         attempted.add(id);
         if (verdict === 'correct') {
           r.innerHTML = '<span style="color:#4a9d6e;font-weight:700">&#10004; Correct!</span>' + (semanticResult.reason ? '<div style="font-size:12px;color:#A8B5B3;margin-top:4px;">' + fmt(semanticResult.reason) + '</div>' : '');
@@ -2132,13 +2149,6 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           if (!done.has(id)) { sc += creditFor(id); done.add(id); }
           const sol = document.getElementById(id + '-solution');
           if (sol) sol.style.display = 'block';
-        } else if (verdict === 'partial') {
-          r.innerHTML = '<span style="color:#C5BD96;font-weight:700">&#9679; Partially Correct</span>' + (semanticResult.reason ? '<div style="font-size:12px;color:#A8B5B3;margin-top:4px;">' + fmt(semanticResult.reason) + '</div>' : '');
-          inp.style.borderColor = '#C5BD96';
-          inp.style.background = 'rgba(197,189,150,0.14)';
-          if (!done.has(id)) { semanticCredit.set(id, 0.5); sc += creditFor(id); done.add(id); }
-          const sol2 = document.getElementById(id + '-solution');
-          if (sol2) sol2.style.display = 'block';
         } else {
           r.innerHTML = '<span style="color:#c9605f;font-weight:700">Not quite. Try again!</span>' + (semanticResult.reason ? '<div style="font-size:12px;color:#A8B5B3;margin-top:4px;">' + fmt(semanticResult.reason) + '</div>' : '');
           inp.style.borderColor = '#c9605f';

@@ -90,3 +90,19 @@ describe('instant answer check on the worksheet page', () => {
     expect(html).toContain('Answer recorded — your teacher will check it');
   });
 });
+
+test('the page sends the worksheet language with the AI meaning check', () => {
+  const html = renderQuizHTML({ language: 'English', tasks: [{ title: 'T', questions: [{ question: 'Capital of France?', answer: 'Paris', type: 'text' }] }] }, {});
+  expect(html).toContain('const WORKSHEET_LANGUAGE = "English";');
+  expect(html).toContain('language: WORKSHEET_LANGUAGE');
+  for (const js of pageScripts(html)) expect(() => new Function(js)).not.toThrow();
+});
+
+test('header: curriculum as text, subject alone, no level label in the title', () => {
+  const html = renderQuizHTML({ school: 'Vethathiri', curriculum: 'CBSE', grade: 'Grade 4', title: 'PYP: 4 Vocabulary Building',
+    subject: 'Language Purpose: Vocabulary building Learning Outcome: Learner uses spell check.', tasks: [] }, {});
+  expect(html).toContain('<div class="header-sub">Vethathiri &middot; CBSE &middot; Grade 4</div>');
+  expect(html).toContain('<h1>Vocabulary Building</h1>');
+  expect(html).toMatch(/Subject: Language &nbsp;\|/);
+});
+

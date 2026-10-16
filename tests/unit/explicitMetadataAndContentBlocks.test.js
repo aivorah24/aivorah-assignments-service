@@ -93,3 +93,27 @@ describe('findMissingNamedBlocks - generic heading-presence check, not exact-wor
     expect(missing).toEqual(expect.arrayContaining(['Learners’ Checklist', 'Credits']));
   });
 });
+
+describe('2026-10-16: .docx header lines joined by line breaks', () => {
+  const { extractExplicitMetadata, htmlToStructuredText } = require('../../services/quizVision');
+
+  test('a subject that shares a line with the next label stops at that label', () => {
+    expect(extractExplicitMetadata('Subject Focus: Language Purpose: Vocabulary building Learning Outcome: Learner uses spell check.').subject).toBe('Language');
+  });
+
+  test('line breaks inside a paragraph stay separate lines', () => {
+    const text = htmlToStructuredText('<p>Subject Focus: Language<br />Purpose: Vocabulary building</p>');
+    expect(extractExplicitMetadata(text)).toMatchObject({ subject: 'Language', purpose: 'Vocabulary building' });
+  });
+
+  test('a table holding another table is written out as its cells: passage, then the real table', () => {
+    const html = '<table><tr><td><p>A long passage the student reads first.</p></td><td><table><tr><td>Incorrect Word</td><td>Correct Word</td></tr><tr><td>buyer</td><td></td></tr></table></td></tr></table>';
+    const text = htmlToStructuredText(html);
+    expect(text).toContain('A long passage the student reads first.\n\n[TABLE - EXACT VALUES, DO NOT ALTER]\nIncorrect Word | Correct Word\nbuyer |');
+    expect(text).not.toMatch(/passage the student reads first\. \|/);
+  });
+
+  test('ordinary tables are unchanged', () => {
+    expect(htmlToStructuredText('<table><tr><td>a</td><td>b</td></tr></table>')).toBe('[TABLE - EXACT VALUES, DO NOT ALTER]\na | b\n[/TABLE]');
+  });
+});

@@ -271,15 +271,28 @@ async function hostExtractedImages(images) {
 // visually infer row/column structure at all, just copy verbatim values.
 function htmlToStructuredText(html) {
   let text = String(html || '');
-  text = text.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (_, tableHtml) => {
-    const rows = [...tableHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)].map(rowMatch => {
-      const cells = [...rowMatch[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(cellMatch =>
-        cellMatch[1].replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim()
-      );
-      return cells.join(' | ');
+  // Innermost tables first. A table holding another table is a side-by-side
+  // layout (a passage next to its answer table), not data: each of its cells
+  // is written out as its own block. Flattening it used to put the passage
+  // into the inner table's header row, and the model then dropped it.
+  const blocks = [];
+  const cellText = c => c.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  const innermost = /<table[^>]*>((?:(?!<table)[\s\S])*?)<\/table>/i;
+  while (innermost.test(text)) {
+    text = text.replace(innermost, (_, tableHtml) => {
+      const rows = [...tableHtml.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)]
+        .map(rowMatch => [...rowMatch[1].matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map(cellMatch => cellMatch[1]));
+      let out;
+      if (rows.some(cells => cells.some(c => /\u0000B\d+\u0000/.test(c)))) {
+        out = '\n' + rows.flat().map(c => c.replace(/<\/(p|li|div)>/gi, '\n').replace(/<[^>]+>/g, '').trim()).filter(Boolean).join('\n\n') + '\n';
+      } else {
+        out = `\n[TABLE - EXACT VALUES, DO NOT ALTER]\n${rows.map(cells => cells.map(cellText).join(' | ')).join('\n')}\n[/TABLE]\n`;
+      }
+      blocks.push(out);
+      return `\u0000B${blocks.length - 1}\u0000`;
     });
-    return `\n[TABLE - EXACT VALUES, DO NOT ALTER]\n${rows.join('\n')}\n[/TABLE]\n`;
-  });
+  }
+  while (/\u0000B\d+\u0000/.test(text)) text = text.replace(/\u0000B(\d+)\u0000/g, (_, i) => blocks[i]);
   // Image markers, added 2026-09-12 (Phase 2 - image/diagram preservation):
   // if the <img> tag's src is a real hosted URL (docxToPdf uploads mammoth's
   // embedded images to Cloudinary before calling this function - see
@@ -291,6 +304,7 @@ function htmlToStructuredText(html) {
   // without a usable URL.
   text = text.replace(/<img[^>]*\bsrc="(https?:\/\/[^"]+)"[^>]*>/gi, (_, url) => `\n[IMAGE: url=${url}]\n`);
   text = text.replace(/<img[^>]*>/gi, '\n[IMAGE]\n');
+  text = text.replace(/<br\s*\/?>/gi, '\n');
   text = text.replace(/<\/(p|h[1-6]|li|div)>/gi, '\n');
   text = text.replace(/<[^>]+>/g, '');
   text = text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&quot;/g, '"');
@@ -1031,12 +1045,16 @@ const EXPLICIT_METADATA_PATTERNS = {
   purpose: /^\s*purpose\s*[:\-]\s*(.+)$/im,
   learningOutcome: /^\s*learning\s*outcome[s]?\s*[:\-]\s*(.+)$/im,
 };
+const METADATA_LABEL = /\s+(?=(?:subject(?:\s*focus)?|purpose|learning\s*outcomes?|learning\s*objectives?|grade|class|topic|date|name\s*of\s*learner)\s*[:\-])/i;
 function extractExplicitMetadata(sourceText) {
   const text = String(sourceText || '');
   const found = {};
   for (const [field, pattern] of Object.entries(EXPLICIT_METADATA_PATTERNS)) {
     const m = text.match(pattern);
-    if (m && m[1] && m[1].trim()) found[field] = m[1].trim();
+    // Several labels can share a line ("Subject Focus: Language Purpose: …"):
+    // a value ends where the next label starts.
+    const value = m && m[1] ? m[1].split(METADATA_LABEL)[0].trim() : '';
+    if (value) found[field] = value;
   }
   return found;
 }
@@ -1593,6 +1611,10 @@ async function generateQuizFromDocument({ buffer, mime, grade, subject, school, 
     });
     resolvePictureRefs(result, doc);
   }
+  // Put back passages/examples the model dropped and lay out fill-in tables
+  // like the worksheet (any provider can do this, so it runs for all of them).
+  const { alignTasksWithSource } = require('./worksheet/sourceAlignment');
+  result.sourceAlignment = alignTasksWithSource(result, sourceText);
   result.extractionStatus = computeExtractionStatus(result);
   const sourceSectionEstimate = estimateSourceSectionCount(sourceText);
   result.conversionReport = buildConversionReport(result, { sourceSectionEstimate, sourceText });
