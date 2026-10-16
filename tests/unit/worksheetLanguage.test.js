@@ -56,7 +56,7 @@ describe('renderQuizHTML — typing answers in any language', () => {
     const html = renderQuizHTML(quiz('माँ'), {});
     expect(html).toContain('if (!enabled || composing || e.isComposing) return;');
     expect(html).toContain("dropdown.querySelector('div[data-active]')");
-    expect(html).not.toContain('div[style*="rgba(147,176,172,0.15)"]');
+    expect(html).not.toContain('div[style*="rgba(186,164,103,0.15)"]');
   });
 
   test('answers are compared and saved NFC-normalized, and keyword matching keeps non-Latin letters', () => {

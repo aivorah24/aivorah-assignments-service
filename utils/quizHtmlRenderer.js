@@ -131,14 +131,14 @@ function renderBarChart(chart) {
   // gridlines + y labels
   for (let v = 0; v <= yMax; v += yStep) {
     const yy = y(v);
-    svg += `<line x1="${padL}" y1="${yy}" x2="${W - padR}" y2="${yy}" stroke="rgba(195,220,216,0.18)" stroke-width="1"></line>`;
+    svg += `<line x1="${padL}" y1="${yy}" x2="${W - padR}" y2="${yy}" stroke="rgba(217,201,160,0.18)" stroke-width="1"></line>`;
     svg += `<text x="${padL - 8}" y="${yy + 4}" text-anchor="end" fill="#A8B5B3" font-size="11" font-family="Arial">${v}</text>`;
   }
   // axes
-  svg += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#93B0AC" stroke-width="1.5"></line>`;
-  svg += `<line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#93B0AC" stroke-width="1.5"></line>`;
+  svg += `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="#BAA467" stroke-width="1.5"></line>`;
+  svg += `<line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="#BAA467" stroke-width="1.5"></line>`;
   // bars
-  const palette = ['#93B0AC', '#C5BD96', '#D4A898', '#7AADA8', '#EFD1D4', '#C3DCD8'];
+  const palette = ['#BAA467', '#C5BD96', '#D4A898', '#C9A24E', '#EFD1D4', '#D9C9A0'];
   bars.forEach((b, i) => {
     const cx = padL + bw * i + bw / 2;
     const x = cx - barW / 2;
@@ -153,7 +153,7 @@ function renderBarChart(chart) {
   svg += `</svg>`;
 
   return `<div style="text-align:center;margin:4px 0 18px;">
-    ${chart.title ? `<div style="font-size:14px;font-weight:700;color:#C3DCD8;margin-bottom:8px;">${chart.title}</div>` : ''}
+    ${chart.title ? `<div style="font-size:14px;font-weight:700;color:#D9C9A0;margin-bottom:8px;">${chart.title}</div>` : ''}
     ${svg}
   </div>`;
 }
@@ -703,7 +703,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
   // exceed this total.
 
   const tierStyles = {
-    'MUST DO':     { bg: 'rgba(147,176,172,0.08)', border: '#93B0AC', label: '#93B0AC', labelBg: 'rgba(147,176,172,0.15)' },
+    'MUST DO':     { bg: 'rgba(186,164,103,0.08)', border: '#BAA467', label: '#BAA467', labelBg: 'rgba(186,164,103,0.15)' },
     'COULD DO':    { bg: 'rgba(197,189,150,0.08)', border: '#C5BD96', label: '#C5BD96', labelBg: 'rgba(197,189,150,0.15)' },
     'ENRICHMENT':  { bg: 'rgba(239,209,212,0.08)', border: '#EFD1D4', label: '#EFD1D4', labelBg: 'rgba(239,209,212,0.15)' },
     // Neutral fallback for any tier language that isn't one of the three
@@ -715,7 +715,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
   };
 
   // Aivorah concept card colors
-  const conceptCardColors = ['#93B0AC', '#C5BD96', '#D4A898', '#C3DCD8', '#EFD1D4', '#7AADA8'];
+  const conceptCardColors = ['#BAA467', '#C5BD96', '#D4A898', '#D9C9A0', '#EFD1D4', '#C9A24E'];
 
   // Concept icon lookup
   const conceptIcons = {
@@ -906,12 +906,12 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         const given = cell !== null && cell !== undefined && String(cell).trim() !== '';
         const trueVal = (solved[r] && solved[r][c] !== undefined) ? solved[r][c] : cell;
         if (given) {
-          inner += `<div style="position:absolute;left:${left}px;top:${top}px;width:${BOX}px;height:${BOX}px;border:1.5px solid rgba(195,220,216,0.4);border-radius:6px;background:rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#F0EEEC;box-sizing:border-box;">${fmt(String(cell))}</div>`;
+          inner += `<div style="position:absolute;left:${left}px;top:${top}px;width:${BOX}px;height:${BOX}px;border:1.5px solid rgba(217,201,160,0.4);border-radius:6px;background:rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:#F0EEEC;box-sizing:border-box;">${fmt(String(cell))}</div>`;
         } else {
           const qId = registerQuestion({ type: 'numeric', answer: trueVal });
           inner += `<input type="text" id="${qId}-input" class="q-input"${inputLangAttr} placeholder="?"
             style="position:absolute;left:${left}px;top:${top}px;width:${BOX}px;height:${BOX}px;
-            border:1.5px dashed rgba(195,220,216,0.5);border-radius:6px;background:rgba(255,255,255,0.06);
+            border:1.5px dashed rgba(217,201,160,0.5);border-radius:6px;background:rgba(255,255,255,0.06);
             color:#F0EEEC;font-size:14px;font-weight:700;text-align:center;box-sizing:border-box;font-family:inherit;">`;
           inner += `<button class="mini-check" title="Check this box" onclick="checkOneGroup('${qId}')"
             style="position:absolute;left:${left + BOX - 20}px;top:${top + BOX - 20}px;width:18px;height:18px;z-index:2;
@@ -923,7 +923,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     const totalW = nRows * BOX + (nRows - 1) * GAP;
     const totalH = nRows * BOX;
     return `<div style="display:inline-block;text-align:left;margin:6px 22px 18px 0;vertical-align:top;">
-      ${pyramid.label ? `<div style="font-size:14px;font-weight:700;color:#C3DCD8;margin-bottom:6px;">${fmt(pyramid.label)}</div>` : ''}
+      ${pyramid.label ? `<div style="font-size:14px;font-weight:700;color:#D9C9A0;margin-bottom:6px;">${fmt(pyramid.label)}</div>` : ''}
       <div style="position:relative;width:${totalW}px;height:${totalH}px;">${inner}</div>
     </div>`;
   }
@@ -973,7 +973,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
   function renderTaskTable(table) {
     let h = '<div class="ws-table-wrap" style="overflow-x:auto;margin:8px 0 14px;">';
-    if (table.title) h += `<div style="font-weight:700;color:#C3DCD8;margin-bottom:8px;">${fmt(String(table.title))}</div>`;
+    if (table.title) h += `<div style="font-weight:700;color:#D9C9A0;margin-bottom:8px;">${fmt(String(table.title))}</div>`;
     const tallyColIdx = Array.isArray(table.headers) ? table.headers.findIndex(x => /tally/i.test(String(x || ''))) : -1;
     // The Frequency column's answer is a plain verified number; the Tally column's
     // own extracted answer is a hand-drawn-pipe STRING that can disagree with it
@@ -988,7 +988,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     h += '<table style="width:100%;border-collapse:collapse;">';
     if (Array.isArray(table.headers) && table.headers.length) {
       h += '<tr>' + table.headers.map(x =>
-        `<th style="border:1px solid rgba(195,220,216,0.28);padding:10px 12px;background:rgba(147,176,172,0.14);color:#D8E8E6;font-size:13px;font-weight:700;text-align:center;">${fmt(String(x))}</th>`
+        `<th style="border:1px solid rgba(217,201,160,0.28);padding:10px 12px;background:rgba(186,164,103,0.14);color:#D8E8E6;font-size:13px;font-weight:700;text-align:center;">${fmt(String(x))}</th>`
       ).join('') + '</tr>';
     }
     for (const row of (table.rows || [])) {
@@ -1002,14 +1002,14 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           // so this cell must NOT be registered (an unregistered cell can't ever block
           // "answer every question" from reaching 100%).
           const freqAnswer = freqColIdx >= 0 ? (row[freqColIdx] && row[freqColIdx].answer) : undefined;
-          h += `<td style="border:1px solid rgba(195,220,216,0.18);padding:8px 12px;text-align:center;">${renderTallyMarks(freqAnswer ?? (cell && cell.answer))}</td>`;
+          h += `<td style="border:1px solid rgba(217,201,160,0.18);padding:8px 12px;text-align:center;">${renderTallyMarks(freqAnswer ?? (cell && cell.answer))}</td>`;
           return;
         }
         if (cell && cell.input) {
           const isNumAns = /^\d+(\.\d+)?$/.test(String(cell.answer || '').trim());
           const qId = registerQuestion({ type: cell._qtype || (isNumAns ? 'numeric' : 'text'), answer: cell.answer });
           const hintText = cell.hint || '';
-          h += `<td style="border:1px solid rgba(195,220,216,0.18);padding:8px;text-align:center;">
+          h += `<td style="border:1px solid rgba(217,201,160,0.18);padding:8px;text-align:center;">
             <div style="display:flex;flex-direction:column;gap:6px;align-items:center;">
               <div style="display:flex;gap:6px;align-items:center;justify-content:center;flex-wrap:wrap;">
                 <input type="text" id="${qId}-input" class="q-input"${inputLangAttr} style="width:100px;padding:6px 8px;font-size:14px;" placeholder="?">
@@ -1023,7 +1023,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
             </div>
           </td>`;
         } else {
-          h += `<td style="border:1px solid rgba(195,220,216,0.18);padding:8px 12px;text-align:center;color:#F0EEEC;font-size:13px;">${fmt(String((cell && cell.text) || ''))}</td>`;
+          h += `<td style="border:1px solid rgba(217,201,160,0.18);padding:8px 12px;text-align:center;color:#F0EEEC;font-size:13px;">${fmt(String((cell && cell.text) || ''))}</td>`;
         }
       });
       h += '</tr>';
@@ -1109,7 +1109,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     if (q.type === 'venn') {
       const leftLabel = q.leftLabel || 'Group A';
       const rightLabel = q.rightLabel || 'Group B';
-      const baseTaStyle = 'position:absolute;box-sizing:border-box;resize:none;border:1.5px dashed rgba(195,220,216,0.5);border-radius:8px;background:rgba(255,255,255,0.06);color:#F0EEEC;font-size:13px;font-family:inherit;padding:6px 8px;text-align:center;';
+      const baseTaStyle = 'position:absolute;box-sizing:border-box;resize:none;border:1.5px dashed rgba(217,201,160,0.5);border-radius:8px;background:rgba(255,255,255,0.06);color:#F0EEEC;font-size:13px;font-family:inherit;padding:6px 8px;text-align:center;';
       const ta = (rid, ph, pos) =>
         `<textarea id="${qId}-${rid}" class="venn-input" placeholder="${ph}" style="${baseTaStyle}${pos}"></textarea>`;
       const solutionHtml = fmtSolution(q.solution || '', { sentences: true });
@@ -1118,9 +1118,9 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         <p style="font-size:12px;color:#A8B5B3;margin:2px 0 0;">Type items separated by commas — shared items go in the middle.</p>
         <div class="venn-wrap" style="position:relative;width:100%;max-width:580px;height:340px;margin:12px auto 8px;">
           <svg viewBox="0 0 580 340" style="position:absolute;inset:0;width:100%;height:100%;">
-            <ellipse cx="210" cy="185" rx="165" ry="140" fill="rgba(147,176,172,0.12)" stroke="#93B0AC" stroke-width="2.5"></ellipse>
+            <ellipse cx="210" cy="185" rx="165" ry="140" fill="rgba(186,164,103,0.12)" stroke="#BAA467" stroke-width="2.5"></ellipse>
             <ellipse cx="370" cy="185" rx="165" ry="140" fill="rgba(197,189,150,0.12)" stroke="#C5BD96" stroke-width="2.5"></ellipse>
-            <text x="150" y="34" text-anchor="middle" fill="#93B0AC" font-size="17" font-weight="700" font-family="Arial">${leftLabel}</text>
+            <text x="150" y="34" text-anchor="middle" fill="#BAA467" font-size="17" font-weight="700" font-family="Arial">${leftLabel}</text>
             <text x="430" y="34" text-anchor="middle" fill="#C5BD96" font-size="17" font-weight="700" font-family="Arial">${rightLabel}</text>
           </svg>
           ${ta('left', leftLabel + ' only', 'left:2%;top:34%;width:26%;height:120px;')}
@@ -1150,8 +1150,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
     if (isTableCell) {
       // Worksheet-style table cell: compact, inline input
-      html += `<div class="ws-cell" id="${qId}-card" style="padding:10px 14px;border-bottom:1px solid rgba(195,220,216,0.15);display:flex;flex-direction:column;align-items:flex-start;gap:8px;">`;
-      html += `<span style="font-size:14px;color:#F0EEEC;"><strong style="color:#C3DCD8">${qLabel}</strong> ${fmtQuestion(questionText)}</span>`;
+      html += `<div class="ws-cell" id="${qId}-card" style="padding:10px 14px;border-bottom:1px solid rgba(217,201,160,0.15);display:flex;flex-direction:column;align-items:flex-start;gap:8px;">`;
+      html += `<span style="font-size:14px;color:#F0EEEC;"><strong style="color:#D9C9A0">${qLabel}</strong> ${fmtQuestion(questionText)}</span>`;
 
       if (q.imageUrl && !q._sharedImage) {
         html += `<div class="q-image" style="margin:4px 0 8px;align-self:center;max-width:100%;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(q.imageUrl)}" alt="${escAttr(q.diagramDescription || 'Diagram')}" style="max-height:240px;"></div>`;
@@ -1168,7 +1168,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         html += q.options.map((opt, i) => {
           const letter = String.fromCharCode(65 + i);
           const label = typeof opt === 'string' ? opt : (opt.label || opt);
-          return `<label style="font-size:13px;color:#F0EEEC;cursor:pointer;padding:4px 8px;border:1px solid rgba(195,220,216,0.2);border-radius:4px;"><input type="radio" name="${qId}" value="${letter}" style="margin-right:4px;"> ${label}</label>`;
+          return `<label style="font-size:13px;color:#F0EEEC;cursor:pointer;padding:4px 8px;border:1px solid rgba(217,201,160,0.2);border-radius:4px;"><input type="radio" name="${qId}" value="${letter}" style="margin-right:4px;"> ${label}</label>`;
         }).join('');
         html += `</div><button class="btn-check" style="padding:6px 14px;font-size:12px;" onclick="checkMCQ('${qId}')">&#10003;</button>`;
       } else {
@@ -1235,7 +1235,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
       // Show example if present
       if (q.example) {
-        html += `<div style="margin:8px 0 12px;padding:10px 14px;background:rgba(195,220,216,0.07);border-left:3px solid rgba(195,220,216,0.4);border-radius:0 8px 8px 0;font-size:13px;color:#A8B5B3;font-style:italic;">${fmt(q.example)}</div>`;
+        html += `<div style="margin:8px 0 12px;padding:10px 14px;background:rgba(217,201,160,0.07);border-left:3px solid rgba(217,201,160,0.4);border-radius:0 8px 8px 0;font-size:13px;color:#A8B5B3;font-style:italic;">${fmt(q.example)}</div>`;
       }
 
       // Vertical column arithmetic (e.g. "96_ - _83 ----- 162"): render as the
@@ -1258,11 +1258,11 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         };
         const digitsRow = (s, row) => String(s).split('').map((d, idx) => digitCell(d, row, idx)).join('');
         const opSpacer = `<span style="display:inline-block;min-width:1.3em;text-align:center;">&nbsp;</span>`;
-        const opCell = `<span style="display:inline-block;min-width:1.3em;text-align:center;color:#93B0AC;">${fmt(vm.operator || '-')}</span>`;
+        const opCell = `<span style="display:inline-block;min-width:1.3em;text-align:center;color:#BAA467;">${fmt(vm.operator || '-')}</span>`;
         html += `<div id="${qId}-vm-display" style="margin:4px 0 16px;font-family:'Courier New',monospace;font-size:22px;font-weight:700;color:#F0EEEC;display:inline-block;text-align:right;line-height:1.5;">
           <div>${opSpacer}${digitsRow(vm.top, 'top')}</div>
           <div>${opCell}${digitsRow(vm.bottom, 'bottom')}</div>
-          <div style="border-top:2px solid #93B0AC;margin:2px 0;"></div>
+          <div style="border-top:2px solid #BAA467;margin:2px 0;"></div>
           <div>${vm.result ? `${opSpacer}${digitsRow(vm.result, 'result')}` : ''}</div>
         </div>
         <div id="${qId}-vm-corrected" style="display:none;margin:4px 0 16px;font-family:'Courier New',monospace;font-size:22px;font-weight:700;color:#F0EEEC;text-align:right;line-height:1.5;"></div>`;
@@ -1274,7 +1274,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
       if (isActivity) {
         html += `
-        <div class="activity-box" style="margin:12px 0;padding:18px 20px;background:linear-gradient(135deg,rgba(147,176,172,0.08),rgba(197,189,150,0.08));border-radius:12px;border:1px solid rgba(147,176,172,0.25)">
+        <div class="activity-box" style="margin:12px 0;padding:18px 20px;background:linear-gradient(135deg,rgba(186,164,103,0.08),rgba(197,189,150,0.08));border-radius:12px;border:1px solid rgba(186,164,103,0.25)">
           <p style="font-size:13px;color:#A8B5B3;margin:0 0 12px;line-height:1.5">This is a hands-on activity. Try it on paper!</p>
         </div>
         <div class="q-actions" style="display:flex;gap:10px;margin-top:10px">
@@ -1307,7 +1307,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         if (isLong) {
           html += `
         <div class="q-input-row" style="flex-direction:column;align-items:stretch;gap:10px;">
-          <textarea id="${qId}-input" class="q-input"${inputLangAttr} rows="3" placeholder="Write your answer here..." style="width:100%;min-height:80px;resize:vertical;font-size:14px;padding:10px;border-radius:8px;border:1.5px solid rgba(195,220,216,0.3);background:rgba(255,255,255,0.05);color:#F0EEEC;font-family:inherit;"></textarea>
+          <textarea id="${qId}-input" class="q-input"${inputLangAttr} rows="3" placeholder="Write your answer here..." style="width:100%;min-height:80px;resize:vertical;font-size:14px;padding:10px;border-radius:8px;border:1.5px solid rgba(217,201,160,0.3);background:rgba(255,255,255,0.05);color:#F0EEEC;font-family:inherit;"></textarea>
           <div style="display:flex;gap:10px;">
             <button class="btn-check" onclick="checkAnswer('${qId}')">Check</button>
             ${q.hint ? `<button class="btn-hint" onclick="toggleHint('${qId}')">Hint</button>` : ''}
@@ -1361,8 +1361,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     <div class="task-block" style="border-left:5px solid ${s.border}; background:${s.bg}; border-radius:12px; padding:20px 24px; margin:28px 0;">
       ${task.tier ? `<span class="tier-badge" style="display:inline-block;background:${s.labelBg};color:${s.label};font-weight:800;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;padding:4px 12px;border-radius:4px;margin-bottom:6px;">${task.tier}</span>` : ''}
       <h2 style="font-size:18px;color:${s.label};margin:6px 0 18px;font-weight:700;">${taskTitle}</h2>
-      ${task.passage ? `<div style="margin:0 0 20px;padding:16px 20px;background:rgba(255,255,255,0.04);border:1px solid rgba(195,220,216,0.2);border-radius:10px;font-size:14px;color:#D8E8E6;line-height:1.8;">${fmt(task.passage)}</div>` : ''}
-      ${task.example ? `<div class="task-example" style="margin:0 0 20px;padding:10px 14px;background:rgba(195,220,216,0.07);border-left:3px solid rgba(195,220,216,0.4);border-radius:0 8px 8px 0;font-size:13px;color:#A8B5B3;"><strong style="color:#C3DCD8;">Example:</strong> ${fmtQuestion(task.example)}</div>` : ''}`;
+      ${task.passage ? `<div style="margin:0 0 20px;padding:16px 20px;background:rgba(255,255,255,0.04);border:1px solid rgba(217,201,160,0.2);border-radius:10px;font-size:14px;color:#D8E8E6;line-height:1.8;">${fmt(task.passage)}</div>` : ''}
+      ${task.example ? `<div class="task-example" style="margin:0 0 20px;padding:10px 14px;background:rgba(217,201,160,0.07);border-left:3px solid rgba(217,201,160,0.4);border-radius:0 8px 8px 0;font-size:13px;color:#A8B5B3;"><strong style="color:#D9C9A0;">Example:</strong> ${fmtQuestion(task.example)}</div>` : ''}`;
 
     // ── MATCH-THE-FOLLOWING: drag & drop words onto pictures (replaces per-question rendering) ──
     if (task._matchTask) {
@@ -1397,7 +1397,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         const w = (b.w * 100).toFixed(2), h = (b.h * 100).toFixed(2);
         return `<input type="text" id="${dfIds[i]}-input" class="q-input df-input"${inputLangAttr}
           style="position:absolute;left:${left}%;top:${top}%;width:${w}%;height:${h}%;box-sizing:border-box;
-          padding:2px 4px;font-size:13px;text-align:center;border:1.5px dashed rgba(195,220,216,0.5);
+          padding:2px 4px;font-size:13px;text-align:center;border:1.5px dashed rgba(217,201,160,0.5);
           border-radius:6px;background:rgba(28,28,28,0.82);color:#F0EEEC;font-weight:700;font-family:inherit;">`
           + `<button class="mini-check" title="Check this box" onclick="checkOneGroup('${dfIds[i]}')"
           style="position:absolute;left:calc(${left}% + ${w}% - 16px);top:calc(${top}% + ${h}% - 16px);width:16px;height:16px;z-index:2;
@@ -1406,7 +1406,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       }).join('');
       tasksHTML += renderDiagramCard({
         instructions: 'Write your answers directly on the diagram below, then tap each check mark.',
-        innerHtml: `<div class="diagram-fill-wrap" style="position:relative;display:inline-block;max-width:100%;background:#fff;border-radius:8px;border:1px solid rgba(195,220,216,0.2);padding:10px;">
+        innerHtml: `<div class="diagram-fill-wrap" style="position:relative;display:inline-block;max-width:100%;background:#fff;border-radius:8px;border:1px solid rgba(217,201,160,0.2);padding:10px;">
           <img src="${embedImage(task.diagramFillImageUrl)}" alt="${escAttr(task.sharedImageDescription || 'Worksheet diagram')}" style="display:block;max-width:100%;height:auto;border-radius:4px;" onerror="wkImgError(this)">
           ${inputsHtml}
         </div>`
@@ -1498,10 +1498,10 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           tasksHTML += `<div class="branch-diagram" style="display:flex;gap:40px;justify-content:center;margin:16px 0 20px;flex-wrap:wrap;">`;
           for (const tree of trees) {
             tasksHTML += `<div class="branch-tree" style="display:flex;align-items:center;gap:12px;">`;
-            tasksHTML += `<span style="font-size:17px;font-weight:700;color:#C3DCD8;">${tree.root}</span>`;
+            tasksHTML += `<span style="font-size:17px;font-weight:700;color:#D9C9A0;">${tree.root}</span>`;
             tasksHTML += `<div style="display:flex;flex-direction:column;gap:0;position:relative;">`;
             // Draw bracket/brace
-            tasksHTML += `<div style="position:absolute;left:-8px;top:4px;bottom:4px;width:8px;border-left:2px solid #93B0AC;border-top:2px solid #93B0AC;border-bottom:2px solid #93B0AC;border-radius:4px 0 0 4px;"></div>`;
+            tasksHTML += `<div style="position:absolute;left:-8px;top:4px;bottom:4px;width:8px;border-left:2px solid #BAA467;border-top:2px solid #BAA467;border-bottom:2px solid #BAA467;border-radius:4px 0 0 4px;"></div>`;
             for (const b of tree.branches) {
               const branchQId = `branch_${qNum}_${b.replace(/\s/g,'')}`;
               tasksHTML += `<div style="padding:6px 0 6px 12px;font-size:15px;color:#F0EEEC;display:flex;align-items:center;gap:8px;">${b} <input type="text" class="lang-input"${inputLangAttr} style="flex:1;max-width:200px;" placeholder=""></div>`;
@@ -1511,7 +1511,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           tasksHTML += `</div>`;
         } else {
           // Generic fallback: show description as a styled note
-          tasksHTML += `<div style="margin:0 0 16px;padding:12px 16px;background:rgba(195,220,216,0.06);border:1px dashed rgba(195,220,216,0.25);border-radius:8px;font-size:13px;color:#A8B5B3;text-align:center;font-style:italic;">📐 ${fmt(desc)}</div>`;
+          tasksHTML += `<div style="margin:0 0 16px;padding:12px 16px;background:rgba(217,201,160,0.06);border:1px dashed rgba(217,201,160,0.25);border-radius:8px;font-size:13px;color:#A8B5B3;text-align:center;font-style:italic;">📐 ${fmt(desc)}</div>`;
         }
       }
     }
@@ -1522,7 +1522,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     // back to task.pageImageUrl, the full page.) Show a plain note instead, for every worksheet.
     const anyQuestionNeedsImage = questions.some(q => q.hasImage && !q.imageUrl);
     if (anyQuestionNeedsImage && task.pageImageUrl) {
-      tasksHTML += `<div style="margin:0 0 16px;padding:10px 14px;background:rgba(195,220,216,0.06);border:1px dashed rgba(195,220,216,0.25);border-radius:8px;font-size:12px;color:#A8B5B3;">Diagram for this task could not be auto-cropped from the worksheet.</div>`;
+      tasksHTML += `<div style="margin:0 0 16px;padding:10px 14px;background:rgba(217,201,160,0.06);border:1px dashed rgba(217,201,160,0.25);border-radius:8px;font-size:12px;color:#A8B5B3;">Diagram for this task could not be auto-cropped from the worksheet.</div>`;
     }
 
     // ── TABLES (one or more per task: data grids + fill-in tally/frequency) ──
@@ -1557,19 +1557,19 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       const leftQIds = leftQuestions.map(q => registerQuestion(q));
       const rightQIds = rightQuestions.map(q => registerQuestion(q));
 
-      tasksHTML += `<table class="ws-table" style="width:100%;border-collapse:collapse;border:1px solid rgba(195,220,216,0.2);border-radius:8px;overflow:hidden;">`;
+      tasksHTML += `<table class="ws-table" style="width:100%;border-collapse:collapse;border:1px solid rgba(217,201,160,0.2);border-radius:8px;overflow:hidden;">`;
 
       // Question rows
       for (let r = 0; r < maxRows; r++) {
         tasksHTML += `<tr>`;
         // Left cell
-        tasksHTML += `<td style="width:50%;vertical-align:top;border:1px solid rgba(195,220,216,0.15);">`;
+        tasksHTML += `<td style="width:50%;vertical-align:top;border:1px solid rgba(217,201,160,0.15);">`;
         if (r < leftQuestions.length) {
           tasksHTML += renderQuestionCell(leftQuestions[r], leftQIds[r], true);
         }
         tasksHTML += `</td>`;
         // Right cell
-        tasksHTML += `<td style="width:50%;vertical-align:top;border:1px solid rgba(195,220,216,0.15);">`;
+        tasksHTML += `<td style="width:50%;vertical-align:top;border:1px solid rgba(217,201,160,0.15);">`;
         if (r < rightQuestions.length) {
           tasksHTML += renderQuestionCell(rightQuestions[r], rightQIds[r], true);
         }
@@ -1601,7 +1601,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           <div class="concept-icon" style="color:${cc}">${getConceptIcon(c.term)}</div>
           <h3 style="color:${cc}">${c.term}</h3>
           <p>${c.definition}</p>
-          ${c.unit && c.unit !== 'N/A' ? `<p class="concept-unit">Measured in<br><strong style="color:#C3DCD8">${c.unit}</strong></p>` : ''}
+          ${c.unit && c.unit !== 'N/A' ? `<p class="concept-unit">Measured in<br><strong style="color:#D9C9A0">${c.unit}</strong></p>` : ''}
         </div>`;
       }).join('') +
       `</div>`;
@@ -1631,7 +1631,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
        when there's no school/curriculum logo to show, the header used to read as a
        separate, visually disconnected dark rectangle sitting on top of the page rather
        than blending into it. */
-    .header { background: #0F0F0F; color: #F0EEEC; padding: 14px 110px 14px 40px; position: relative; border-bottom: 1px solid rgba(195,220,216,0.12); display: flex; align-items: center; gap: 16px; flex-wrap: wrap; min-height: 60px; }
+    .header { background: #0F0F0F; color: #F0EEEC; padding: 14px 110px 14px 40px; position: relative; border-bottom: 1px solid rgba(217,201,160,0.12); display: flex; align-items: center; gap: 16px; flex-wrap: wrap; min-height: 60px; }
     /* flex-grow MUST stay 0 here — giving header-text grow:1 (equal to
        header-logos) let it fight header-logos for free space, which pushed the
        logos off the true center between title and score (the regression seen
@@ -1641,7 +1641,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     .header-text { text-align: left; flex: 0 1 260px; min-width: 0; }
     .header-text h1 { overflow-wrap: anywhere; }
     .header-sub { font-size: 13px; color: #5A6B69; margin-bottom: 2px; }
-    .header h1 { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; color: #C3DCD8; margin: 0; }
+    .header h1 { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; color: #D9C9A0; margin: 0; }
     .header-meta { font-size: 13px; color: #5A6B69; margin-top: 2px; }
     /* Centered in the space BETWEEN the title text and the score badge, not the
        header box's raw 50% mark — the box has asymmetric padding (extra room on
@@ -1667,18 +1667,18 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
     /* ── Score Badge — anchored to the header itself, not the viewport ── */
     .score { position: absolute; top: 50%; right: 24px; transform: translateY(-50%); width: 76px; height: 76px; border-radius: 50%;
-             background: linear-gradient(135deg, #93B0AC, #7AADA8); color: #0F0F0F;
+             background: linear-gradient(135deg, #BAA467, #C9A24E); color: #0F0F0F;
              display: flex; flex-direction: column; align-items: center; justify-content: center;
-             box-shadow: 0 4px 20px rgba(147,176,172,0.3); z-index: 100; }
+             box-shadow: 0 4px 20px rgba(186,164,103,0.3); z-index: 100; }
     .score-num { font-size: 22px; font-weight: 800; line-height: 1; }
     .score-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.7; margin-top: 2px; }
 
     /* ── Progress ── */
     .progress-wrap { padding: 20px 0 4px; }
     .progress-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #5A6B69; margin-bottom: 8px; }
-    .progress-bar { background: #252525; border-radius: 6px; height: 12px; overflow: hidden; border: 1px solid rgba(195,220,216,0.08); }
-    .progress-fill { background: linear-gradient(90deg, #93B0AC, #C3DCD8); height: 100%; border-radius: 6px; transition: width 0.6s ease; }
-    .progress-pct { text-align: right; font-size: 12px; color: #93B0AC; font-weight: 600; margin-top: 4px; }
+    .progress-bar { background: #252525; border-radius: 6px; height: 12px; overflow: hidden; border: 1px solid rgba(217,201,160,0.08); }
+    .progress-fill { background: linear-gradient(90deg, #BAA467, #D9C9A0); height: 100%; border-radius: 6px; transition: width 0.6s ease; }
+    .progress-pct { text-align: right; font-size: 12px; color: #BAA467; font-weight: 600; margin-top: 4px; }
 
     /* ── Container ── */
     .container { max-width: 960px; margin: 0 auto; padding: 0 24px 60px; }
@@ -1693,37 +1693,37 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
     /* ── Question cards ── */
     .q-card { background: #1C1C1C; padding: 20px 24px; border-radius: 10px; margin: 14px 0;
-              box-shadow: 0 2px 8px rgba(0,0,0,0.3); border: 1px solid rgba(195,220,216,0.12); }
+              box-shadow: 0 2px 8px rgba(0,0,0,0.3); border: 1px solid rgba(217,201,160,0.12); }
     .q-text { font-size: 15px; color: #F0EEEC; margin-bottom: 14px; line-height: 1.6; }
-    .q-text strong { color: #C3DCD8; }
+    .q-text strong { color: #D9C9A0; }
     .frac { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; line-height: 1.15; margin: 0 2px; }
     .frac > span:first-child { border-bottom: 1.5px solid currentColor; padding: 0 3px; }
 
     /* ── Input row ── */
     .q-input-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
     .q-label { font-weight: 700; font-size: 14px; color: #A8B5B3; }
-    .q-input { width: 130px; padding: 10px 12px; border: 2px solid rgba(195,220,216,0.25); border-radius: 8px;
+    .q-input { width: 130px; padding: 10px 12px; border: 2px solid rgba(217,201,160,0.25); border-radius: 8px;
                font-size: 16px; text-align: center; transition: border-color 0.2s; background: #252525; color: #F0EEEC; }
-    .q-input:focus { border-color: #93B0AC; outline: none; box-shadow: 0 0 0 3px rgba(147,176,172,0.2); }
+    .q-input:focus { border-color: #BAA467; outline: none; box-shadow: 0 0 0 3px rgba(186,164,103,0.2); }
     .q-unit { font-size: 14px; color: #A8B5B3; font-weight: 500; }
 
     /* ── MCQ ── */
     .mcq-opt { display: block; margin: 8px 0; padding: 10px 14px; border-radius: 8px;
-               border: 1.5px solid rgba(195,220,216,0.15); cursor: pointer; font-size: 14px; color: #F0EEEC; transition: all 0.2s; }
-    .mcq-opt:hover { background: rgba(147,176,172,0.1); border-color: #93B0AC; }
+               border: 1.5px solid rgba(217,201,160,0.15); cursor: pointer; font-size: 14px; color: #F0EEEC; transition: all 0.2s; }
+    .mcq-opt:hover { background: rgba(186,164,103,0.1); border-color: #BAA467; }
     .mcq-opt input { margin-right: 8px; }
 
     /* ── Buttons ── */
-    .btn-check { background: #93B0AC; color: #0F0F0F; border: none; padding: 10px 24px; border-radius: 8px;
+    .btn-check { background: #BAA467; color: #0F0F0F; border: none; padding: 10px 24px; border-radius: 8px;
                  font-weight: 700; font-size: 14px; cursor: pointer; transition: all 0.2s; }
-    .btn-check:hover { background: #7AADA8; transform: translateY(-1px); }
+    .btn-check:hover { background: #C9A24E; transform: translateY(-1px); }
     .mini-check:hover { transform: scale(1.15); }
     .btn-hint { background: #C5BD96; color: #0F0F0F; border: none; padding: 10px 20px; border-radius: 8px;
                 font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.2s; }
     .btn-hint:hover { opacity: 0.85; transform: translateY(-1px); }
-    .btn-show { background: #93B0AC; color: #0F0F0F; border: none; padding: 8px 18px; border-radius: 6px;
+    .btn-show { background: #BAA467; color: #0F0F0F; border: none; padding: 8px 18px; border-radius: 6px;
                 font-weight: 600; font-size: 13px; cursor: pointer; margin-top: 10px; }
-    .btn-show:hover { background: #7AADA8; }
+    .btn-show:hover { background: #C9A24E; }
 
     /* ── Feedback boxes ── */
     .hint-box { margin-top: 12px; padding: 14px 16px; background: rgba(197,189,150,0.1); border-radius: 8px;
@@ -1733,49 +1733,49 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
                     border-left: 4px solid #4a9d6e; color: #4a9d6e; font-size: 14px; line-height: 1.7; }
 
     /* ── Activity boxes ── */
-    .activity-box { background: linear-gradient(135deg, rgba(147,176,172,0.08), rgba(197,189,150,0.08)) !important;
-                    border-color: rgba(147,176,172,0.25) !important; }
+    .activity-box { background: linear-gradient(135deg, rgba(186,164,103,0.08), rgba(197,189,150,0.08)) !important;
+                    border-color: rgba(186,164,103,0.25) !important; }
 
     /* ── Language worksheet layout (Telugu, Hindi, etc.) ── */
-    .lang-q-row { padding: 16px 20px 12px; margin: 6px 0; border-bottom: 1px solid rgba(195,220,216,0.08); }
+    .lang-q-row { padding: 16px 20px 12px; margin: 6px 0; border-bottom: 1px solid rgba(217,201,160,0.08); }
     .lang-q-left { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
-    .lang-q-num { font-size: 15px; color: #93B0AC; font-weight: 700; flex-shrink: 0; min-width: 28px; }
+    .lang-q-num { font-size: 15px; color: #BAA467; font-weight: 700; flex-shrink: 0; min-width: 28px; }
     .lang-q-text { font-size: 16px; color: #F0EEEC; line-height: 1.8; }
-    .lang-q-text strong { color: #C3DCD8; }
-    .lang-example { margin: 4px 0 10px 38px; padding: 8px 14px; background: rgba(195,220,216,0.05);
-                    border-left: 3px solid rgba(195,220,216,0.3); border-radius: 0 6px 6px 0;
+    .lang-q-text strong { color: #D9C9A0; }
+    .lang-example { margin: 4px 0 10px 38px; padding: 8px 14px; background: rgba(217,201,160,0.05);
+                    border-left: 3px solid rgba(217,201,160,0.3); border-radius: 0 6px 6px 0;
                     font-size: 14px; color: #A8B5B3; font-style: italic; }
     .lang-q-answer { display: flex; align-items: center; gap: 12px; margin-left: 38px; flex-wrap: wrap; }
     .lang-input { flex: 1; max-width: 280px; padding: 8px 4px; font-size: 16px; color: #F0EEEC;
-                  background: transparent; border: none; border-bottom: 2px dotted rgba(195,220,216,0.35);
+                  background: transparent; border: none; border-bottom: 2px dotted rgba(217,201,160,0.35);
                   outline: none; font-family: inherit; transition: border-color 0.2s; }
-    .lang-input:focus { border-bottom-color: #93B0AC; border-bottom-style: solid; }
+    .lang-input:focus { border-bottom-color: #BAA467; border-bottom-style: solid; }
     .lang-input::placeholder { color: transparent; }
     .lang-q-actions { display: flex; gap: 6px; flex-shrink: 0; }
-    .lang-btn-check { width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid rgba(147,176,172,0.4);
-                      background: transparent; color: #93B0AC; font-size: 14px; cursor: pointer;
+    .lang-btn-check { width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid rgba(186,164,103,0.4);
+                      background: transparent; color: #BAA467; font-size: 14px; cursor: pointer;
                       display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
-    .lang-btn-check:hover { background: rgba(147,176,172,0.15); border-color: #93B0AC; }
+    .lang-btn-check:hover { background: rgba(186,164,103,0.15); border-color: #BAA467; }
     /* Match-the-following drag & drop */
-    .match-bank { display:flex; flex-wrap:wrap; gap:10px; padding:14px; margin:4px 0 18px; background:rgba(147,176,172,0.07);
-      border:1.5px dashed rgba(147,176,172,0.35); border-radius:10px; min-height:52px; }
-    .match-chip { display:inline-block; padding:8px 18px; background:#2A2F2E; color:#F0EEEC; border:1.5px solid rgba(147,176,172,0.5);
+    .match-bank { display:flex; flex-wrap:wrap; gap:10px; padding:14px; margin:4px 0 18px; background:rgba(186,164,103,0.07);
+      border:1.5px dashed rgba(186,164,103,0.35); border-radius:10px; min-height:52px; }
+    .match-chip { display:inline-block; padding:8px 18px; background:#2A2F2E; color:#F0EEEC; border:1.5px solid rgba(186,164,103,0.5);
       border-radius:24px; font-size:15px; font-weight:600; cursor:grab; user-select:none; transition:transform .12s, box-shadow .12s, border-color .12s; }
-    .match-chip:hover { transform:translateY(-1px); box-shadow:0 2px 8px rgba(0,0,0,0.35); border-color:#93B0AC; }
+    .match-chip:hover { transform:translateY(-1px); box-shadow:0 2px 8px rgba(0,0,0,0.35); border-color:#BAA467; }
     .match-chip.sel { outline:2px solid #C5BD96; background:rgba(197,189,150,0.15); }
     .match-grid { display:flex; flex-wrap:wrap; gap:16px; }
-    .match-card { flex:1 1 170px; max-width:220px; background:rgba(255,255,255,0.03); border:1px solid rgba(195,220,216,0.18);
+    .match-card { flex:1 1 170px; max-width:220px; background:rgba(255,255,255,0.03); border:1px solid rgba(217,201,160,0.18);
       border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:8px; align-items:center; }
-    .match-card-label { align-self:flex-start; font-size:12px; font-weight:700; color:#93B0AC; }
+    .match-card-label { align-self:flex-start; font-size:12px; font-weight:700; color:#BAA467; }
     .match-img { background:#fff; border-radius:8px; padding:6px; width:100%; text-align:center; }
     .match-img img { max-width:100%; height:auto; max-height:130px; object-fit:contain; border-radius:4px; }
     /* Worksheet pictures: natural size up to the card width, never stretched or cropped. */
     .wk-img { display:block; box-sizing:border-box; width:auto; height:auto; max-width:100%; max-height:420px;
-      object-fit:contain; margin:0 auto; background:#fff; padding:8px; border-radius:8px; border:1px solid rgba(195,220,216,0.2); }
-    .wk-img-missing { font-size:12px; color:#A8B5B3; padding:8px 12px; border:1px dashed rgba(195,220,216,0.25); border-radius:8px; }
+      object-fit:contain; margin:0 auto; background:#fff; padding:8px; border-radius:8px; border:1px solid rgba(217,201,160,0.2); }
+    .wk-img-missing { font-size:12px; color:#A8B5B3; padding:8px 12px; border:1px dashed rgba(217,201,160,0.25); border-radius:8px; }
     @media (max-width: 520px) { .q-image-indent { margin-left:0 !important; } }
     .match-img-text { background:rgba(255,255,255,0.05); color:#F0EEEC; font-size:13px; padding:12px; }
-    .match-slot { width:100%; min-height:46px; border:1.5px dashed rgba(195,220,216,0.45); border-radius:10px; display:flex;
+    .match-slot { width:100%; min-height:46px; border:1.5px dashed rgba(217,201,160,0.45); border-radius:10px; display:flex;
       align-items:center; justify-content:center; padding:4px; cursor:pointer; transition:border-color .15s, background .15s; }
     .match-slot-ph { font-size:12px; color:#7c8a88; pointer-events:none; }
     .match-slot.filled .match-slot-ph { display:none; }
@@ -1788,8 +1788,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     .lang-result { margin: 4px 0 0 38px; font-size: 14px; min-height: 4px; }
     .lang-mcq-opts { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 4px 38px; align-items: center; }
     .lang-mcq-opt { font-size: 14px; color: #F0EEEC; cursor: pointer; padding: 6px 12px;
-                    border: 1px solid rgba(195,220,216,0.2); border-radius: 6px; transition: all 0.2s; }
-    .lang-mcq-opt:hover { background: rgba(147,176,172,0.1); border-color: #93B0AC; }
+                    border: 1px solid rgba(217,201,160,0.2); border-radius: 6px; transition: all 0.2s; }
+    .lang-mcq-opt:hover { background: rgba(186,164,103,0.1); border-color: #BAA467; }
     .lang-mcq-opt input { margin-right: 6px; }
 
     /* ── Responsive ── */
@@ -1839,12 +1839,12 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       ${quiz.learningOutcomes?.length ? `<ul style="margin:0;padding-left:20px;">${quiz.learningOutcomes.map(o => `<li style="font-size:14px;color:#D8C79A;margin:4px 0;">${fmt(o)}</li>`).join('')}</ul>` : ''}
     </div>` : ''}
     ${conceptsHTML}
-    ${quiz.notes ? `<div style="background:rgba(147,176,172,0.08);border:1px solid rgba(147,176,172,0.2);border-radius:10px;padding:16px 20px;margin:16px 0;">
-      <h3 style="font-size:14px;color:#93B0AC;margin-bottom:6px;font-weight:700;">&#128221; Note</h3>
+    ${quiz.notes ? `<div style="background:rgba(186,164,103,0.08);border:1px solid rgba(186,164,103,0.2);border-radius:10px;padding:16px 20px;margin:16px 0;">
+      <h3 style="font-size:14px;color:#BAA467;margin-bottom:6px;font-weight:700;">&#128221; Note</h3>
       <p style="font-size:14px;color:#A8B5B3;line-height:1.5;">${fmt(quiz.notes)}</p>
     </div>` : ''}
-    ${quiz.successCriteria?.length ? `<div style="background:rgba(147,176,172,0.08);border:1px solid rgba(147,176,172,0.2);border-radius:10px;padding:16px 20px;margin:16px 0;">
-      <h3 style="font-size:14px;color:#93B0AC;margin-bottom:8px;font-weight:700;">&#127919; Success Criteria</h3>
+    ${quiz.successCriteria?.length ? `<div style="background:rgba(186,164,103,0.08);border:1px solid rgba(186,164,103,0.2);border-radius:10px;padding:16px 20px;margin:16px 0;">
+      <h3 style="font-size:14px;color:#BAA467;margin-bottom:8px;font-weight:700;">&#127919; Success Criteria</h3>
       <ul style="margin:0;padding-left:20px;">${quiz.successCriteria.map(c => `<li style="font-size:14px;color:#A8B5B3;margin:4px 0;">${fmt(c)}</li>`).join('')}</ul>
     </div>` : ''}
     ${quiz.wordBank?.length ? `<div style="background:rgba(197,165,106,0.08);border:1px solid rgba(197,165,106,0.25);border-radius:10px;padding:16px 20px;margin:16px 0;">
@@ -1852,8 +1852,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       <div style="display:flex;flex-wrap:wrap;gap:8px;">${quiz.wordBank.map(w => `<span style="background:rgba(197,165,106,0.15);border:1px solid rgba(197,165,106,0.35);border-radius:20px;padding:5px 14px;font-size:13px;color:#D8C79A;font-weight:600;">${fmt(w)}</span>`).join('')}</div>
     </div>` : ''}
     ${tasksHTML}
-    ${quiz.checklist?.length ? `<div style="background:rgba(147,176,172,0.08);border:1px solid rgba(147,176,172,0.2);border-radius:10px;padding:16px 20px;margin:16px 0;">
-      <h3 style="font-size:14px;color:#93B0AC;margin-bottom:10px;font-weight:700;">&#9989; Learners' Checklist</h3>
+    ${quiz.checklist?.length ? `<div style="background:rgba(186,164,103,0.08);border:1px solid rgba(186,164,103,0.2);border-radius:10px;padding:16px 20px;margin:16px 0;">
+      <h3 style="font-size:14px;color:#BAA467;margin-bottom:10px;font-weight:700;">&#9989; Learners' Checklist</h3>
       ${quiz.checklist.map((c, i) => `<label style="display:flex;align-items:flex-start;gap:10px;font-size:14px;color:#A8B5B3;margin:8px 0;cursor:pointer;"><input type="checkbox" id="checklist-${i}" style="margin-top:3px;width:16px;height:16px;flex-shrink:0;"><span>${fmt(c)}</span></label>`).join('')}
     </div>` : ''}
     ${quiz.credits ? `<div style="text-align:center;font-size:12px;color:#6b7280;margin:20px 0 0;">${fmt(quiz.credits)}</div>` : ''}
@@ -2210,14 +2210,14 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
           return '<span style="' + style + '">' + d + '</span>';
         }).join('');
         const opSp = '<span style="display:inline-block;min-width:1.3em;text-align:center;">&nbsp;</span>';
-        const opC = '<span style="display:inline-block;min-width:1.3em;text-align:center;color:#93B0AC;">' + (a.vmOperator || '-') + '</span>';
+        const opC = '<span style="display:inline-block;min-width:1.3em;text-align:center;color:#BAA467;">' + (a.vmOperator || '-') + '</span>';
         const corrected = document.getElementById(id + '-vm-corrected');
         if (corrected) {
           corrected.innerHTML =
-            '<div style="font-size:12px;color:#93B0AC;font-family:inherit;font-weight:600;margin-bottom:4px;">Corrected working:</div>' +
+            '<div style="font-size:12px;color:#BAA467;font-family:inherit;font-weight:600;margin-bottom:4px;">Corrected working:</div>' +
             '<div>' + opSp + correctedRow(a.vmTop, 'top') + '</div>' +
             '<div>' + opC + correctedRow(a.vmBottom, 'bottom') + '</div>' +
-            '<div style="border-top:2px solid #93B0AC;margin:2px 0;"></div>' +
+            '<div style="border-top:2px solid #BAA467;margin:2px 0;"></div>' +
             '<div>' + opSp + correctedRow(a.vmResult, 'result') + '</div>';
           corrected.style.display = 'block';
         }
@@ -2449,7 +2449,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // Suggestion dropdown
       let dropdown = document.createElement('div');
       dropdown.id = 'translit-dropdown';
-      dropdown.style.cssText = 'position:absolute;z-index:9999;background:#1C1C1C;border:1px solid rgba(147,176,172,0.4);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.5);display:none;overflow:hidden;min-width:120px;';
+      dropdown.style.cssText = 'position:absolute;z-index:9999;background:#1C1C1C;border:1px solid rgba(186,164,103,0.4);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.5);display:none;overflow:hidden;min-width:120px;';
       document.body.appendChild(dropdown);
 
       let activeInput = null;
@@ -2461,7 +2461,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // spaces, so matching on the style string never found it (Enter/Space did nothing).
       function setActive(opt) {
         dropdown.querySelectorAll('div').forEach(function(d) { d.style.background = 'transparent'; d.removeAttribute('data-active'); });
-        if (opt) { opt.style.background = 'rgba(147,176,172,0.15)'; opt.setAttribute('data-active', '1'); }
+        if (opt) { opt.style.background = 'rgba(186,164,103,0.15)'; opt.setAttribute('data-active', '1'); }
       }
 
       function showDropdown(suggestions, input) {
@@ -2470,7 +2470,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         suggestions.forEach(function(s, i) {
           var opt = document.createElement('div');
           opt.textContent = s;
-          opt.style.cssText = 'padding:8px 14px;font-size:15px;color:#F0EEEC;cursor:pointer;border-bottom:1px solid rgba(195,220,216,0.08);';
+          opt.style.cssText = 'padding:8px 14px;font-size:15px;color:#F0EEEC;cursor:pointer;border-bottom:1px solid rgba(217,201,160,0.08);';
           if (i === 0) setActive(opt);
           opt.onmouseenter = function() { setActive(opt); };
           opt.onmousedown = function(e) {
@@ -2569,15 +2569,15 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       indicator.setAttribute('role', 'button');
       indicator.setAttribute('aria-haspopup', 'listbox');
       indicator.innerHTML = '<span class="lang-ind-icon"></span><span class="lang-ind-text"></span>';
-      indicator.style.cssText = 'position:fixed;bottom:20px;left:20px;background:#1C1C1C;color:#93B0AC;padding:8px 16px;border-radius:20px;border:1px solid rgba(147,176,172,0.3);z-index:999;display:flex;align-items:center;gap:8px;font-family:inherit;box-shadow:0 2px 12px rgba(0,0,0,0.4);cursor:pointer;user-select:none;transition:all 0.2s;';
+      indicator.style.cssText = 'position:fixed;bottom:20px;left:20px;background:#1C1C1C;color:#BAA467;padding:8px 16px;border-radius:20px;border:1px solid rgba(186,164,103,0.3);z-index:999;display:flex;align-items:center;gap:8px;font-family:inherit;box-shadow:0 2px 12px rgba(0,0,0,0.4);cursor:pointer;user-select:none;transition:all 0.2s;';
       var menu = document.createElement('div');
       menu.id = 'lang-menu';
       menu.setAttribute('role', 'listbox');
-      menu.style.cssText = 'position:fixed;bottom:64px;left:20px;background:#1C1C1C;border:1px solid rgba(147,176,172,0.3);border-radius:12px;z-index:1000;display:none;max-height:50vh;overflow:auto;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,0.5);';
+      menu.style.cssText = 'position:fixed;bottom:64px;left:20px;background:#1C1C1C;border:1px solid rgba(186,164,103,0.3);border-radius:12px;z-index:1000;display:none;max-height:50vh;overflow:auto;min-width:170px;box-shadow:0 4px 16px rgba(0,0,0,0.5);';
       function paint() {
         indicator.querySelector('.lang-ind-icon').textContent = enabled ? current.label : 'EN';
         indicator.querySelector('.lang-ind-text').textContent = enabled ? current.name + ' ON' : 'My keyboard';
-        indicator.style.borderColor = enabled ? 'rgba(147,176,172,0.3)' : 'rgba(197,189,150,0.3)';
+        indicator.style.borderColor = enabled ? 'rgba(186,164,103,0.3)' : 'rgba(197,189,150,0.3)';
         document.querySelectorAll('.lang-input, .q-input').forEach(function(inp) { inp.setAttribute('lang', enabled ? current.code : '${detectedLang}'); });
       }
       function choose(code) {
@@ -2592,7 +2592,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         opt.setAttribute('role', 'option');
         opt.dataset.code = l.code;
         opt.textContent = l.label + '  ' + l.name;
-        opt.style.cssText = 'padding:9px 14px;font-size:14px;color:#F0EEEC;cursor:pointer;border-bottom:1px solid rgba(195,220,216,0.08);';
+        opt.style.cssText = 'padding:9px 14px;font-size:14px;color:#F0EEEC;cursor:pointer;border-bottom:1px solid rgba(217,201,160,0.08);';
         opt.onmousedown = function(e) { e.preventDefault(); choose(l.code); };
         menu.appendChild(opt);
       });
@@ -2604,7 +2604,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
       // Style for indicator
       var style = document.createElement('style');
-      style.textContent = '.lang-ind-icon{font-size:14px;font-weight:800;} .lang-ind-text{font-size:11px;opacity:0.7;} #lang-indicator:hover{transform:scale(1.05);border-color:#93B0AC!important;}';
+      style.textContent = '.lang-ind-icon{font-size:14px;font-weight:800;} .lang-ind-text{font-size:11px;opacity:0.7;} #lang-indicator:hover{transform:scale(1.05);border-color:#BAA467!important;}';
       document.head.appendChild(style);
     })();
     ` : ''}
@@ -2618,20 +2618,20 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // Build palette
       var palette = document.createElement('div');
       palette.id = 'fr-palette';
-      palette.style.cssText = 'position:fixed;bottom:20px;left:20px;background:#1C1C1C;border:1px solid rgba(147,176,172,0.3);border-radius:12px;z-index:999;padding:8px 10px;display:flex;flex-wrap:wrap;gap:4px;max-width:320px;box-shadow:0 4px 16px rgba(0,0,0,0.4);align-items:center;';
+      palette.style.cssText = 'position:fixed;bottom:20px;left:20px;background:#1C1C1C;border:1px solid rgba(186,164,103,0.3);border-radius:12px;z-index:999;padding:8px 10px;display:flex;flex-wrap:wrap;gap:4px;max-width:320px;box-shadow:0 4px 16px rgba(0,0,0,0.4);align-items:center;';
 
       // Label
       var label = document.createElement('span');
       label.textContent = 'FR';
-      label.style.cssText = 'font-size:12px;font-weight:800;color:#93B0AC;margin-right:6px;';
+      label.style.cssText = 'font-size:12px;font-weight:800;color:#BAA467;margin-right:6px;';
       palette.appendChild(label);
 
       ACCENTS.forEach(function(ch) {
         var btn = document.createElement('button');
         btn.textContent = ch;
-        btn.style.cssText = 'width:28px;height:28px;border:1px solid rgba(195,220,216,0.2);border-radius:6px;background:transparent;color:#F0EEEC;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;padding:0;';
-        btn.onmouseenter = function() { btn.style.background = 'rgba(147,176,172,0.2)'; btn.style.borderColor = '#93B0AC'; };
-        btn.onmouseleave = function() { btn.style.background = 'transparent'; btn.style.borderColor = 'rgba(195,220,216,0.2)'; };
+        btn.style.cssText = 'width:28px;height:28px;border:1px solid rgba(217,201,160,0.2);border-radius:6px;background:transparent;color:#F0EEEC;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;padding:0;';
+        btn.onmouseenter = function() { btn.style.background = 'rgba(186,164,103,0.2)'; btn.style.borderColor = '#BAA467'; };
+        btn.onmouseleave = function() { btn.style.background = 'transparent'; btn.style.borderColor = 'rgba(217,201,160,0.2)'; };
         btn.onmousedown = function(e) {
           e.preventDefault();
           if (!activeInput) return;
