@@ -22,6 +22,13 @@ jest.mock('groq-sdk', () => jest.fn().mockImplementation(() => ({
   chat: { completions: { create: (...args) => mockGroqCreate(...args) } },
 })));
 
+// Drawings/photos are graded by services/visionGrader (Gemini -> Mistral -> Qwen);
+// Groq only writes the text feedback.
+const mockVisionGrade = jest.fn();
+jest.mock('../../services/visionGrader', () => ({
+  callVisionGrader: (...args) => mockVisionGrade(...args),
+}));
+
 const mockCloudinaryUpload = jest.fn();
 jest.mock('cloudinary', () => ({
   v2: { config: jest.fn(), uploader: { upload: (...args) => mockCloudinaryUpload(...args) } },
@@ -35,6 +42,10 @@ const STUDENT_UUID = '11111111-1111-1111-1111-111111111111';
 
 function groqJson(obj) {
   return Promise.resolve({ choices: [{ message: { content: JSON.stringify(obj) } }] });
+}
+
+function visionJson(obj) {
+  return Promise.resolve(JSON.stringify(obj));
 }
 
 function baseAssignmentRow(overrides = {}) {
@@ -53,6 +64,7 @@ const FILL_Q = { id: 'q3', question: 'The capital of France is ___.', type: 'fil
 beforeEach(() => {
   mockSb.reset();
   mockGroqCreate.mockReset();
+  mockVisionGrade.mockReset();
   mockCloudinaryUpload.mockReset();
 });
 
@@ -96,7 +108,7 @@ describe('POST /assignments/:id/submit — quiz drawing/photo question (real end
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm1.jpg' });
-    mockGroqCreate.mockResolvedValueOnce(groqJson({ answered: true, score: 80, studentAnswer: 'A farm with rows of crops and animals.', correct: true, comment: 'Great farm!', teacherNote: '' }));
+    mockVisionGrade.mockResolvedValueOnce(visionJson({ answered: true, score: 80, studentAnswer: 'A farm with rows of crops and animals.', correct: true, comment: 'Great farm!', teacherNote: '' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
       studentId: STUDENT_UUID,
@@ -116,7 +128,7 @@ describe('POST /assignments/:id/submit — quiz drawing/photo question (real end
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm2.jpg' });
-    mockGroqCreate.mockResolvedValueOnce(groqJson({ answered: true, score: 85, studentAnswer: 'A detailed farm drawing.', correct: true, comment: 'Wonderful!', teacherNote: 'Clear labels.' }));
+    mockVisionGrade.mockResolvedValueOnce(visionJson({ answered: true, score: 85, studentAnswer: 'A detailed farm drawing.', correct: true, comment: 'Wonderful!', teacherNote: 'Clear labels.' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
       studentId: STUDENT_UUID,
@@ -138,7 +150,7 @@ describe('POST /assignments/:id/submit — quiz drawing/photo question (real end
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockRejectedValue(new Error('quota exceeded'));
-    mockGroqCreate.mockResolvedValueOnce(groqJson({ answered: true, score: 70, studentAnswer: 'A farm.', correct: true, comment: 'Nice!', teacherNote: '' }));
+    mockVisionGrade.mockResolvedValueOnce(visionJson({ answered: true, score: 70, studentAnswer: 'A farm.', correct: true, comment: 'Nice!', teacherNote: '' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
       studentId: STUDENT_UUID,
@@ -157,7 +169,7 @@ describe('POST /assignments/:id/submit — quiz drawing/photo question (real end
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm3.jpg' });
-    mockGroqCreate.mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }));
+    mockVisionGrade.mockResolvedValueOnce('not valid json {{{');
 
     const res = await request(app).post('/assignments/a1/submit').send({
       studentId: STUDENT_UUID,
@@ -179,7 +191,7 @@ describe('POST /assignments/:id/submit — quiz drawing/photo question (real end
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://x/e.jpg' });
     // Drawing question's AI response fails to parse -> needsReview. MCQ answered correctly -> 100.
-    mockGroqCreate.mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }));
+    mockVisionGrade.mockResolvedValueOnce('not valid json {{{');
 
     const res = await request(app).post('/assignments/a1/submit').send({
       studentId: STUDENT_UUID,

@@ -24,6 +24,13 @@ jest.mock('groq-sdk', () => jest.fn().mockImplementation(() => ({
   chat: { completions: { create: (...args) => mockGroqCreate(...args) } },
 })));
 
+// Drawings/photos are graded by services/visionGrader (Gemini -> Mistral -> Qwen);
+// Groq only writes the text feedback.
+const mockVisionGrade = jest.fn();
+jest.mock('../../services/visionGrader', () => ({
+  callVisionGrader: (...args) => mockVisionGrade(...args),
+}));
+
 const mockCloudinaryUpload = jest.fn();
 jest.mock('cloudinary', () => ({
   v2: { config: jest.fn(), uploader: { upload: (...args) => mockCloudinaryUpload(...args) } },
@@ -38,6 +45,10 @@ function groqJson(obj) {
   return Promise.resolve({ choices: [{ message: { content: JSON.stringify(obj) } }] });
 }
 
+function visionJson(obj) {
+  return Promise.resolve(JSON.stringify(obj));
+}
+
 function baseAssignmentRow(overrides = {}) {
   return {
     id: 'a1', title: 'Draw Your Farm', subject: 'Visual Arts', chapter: '', grade: 'Grade 3',
@@ -50,6 +61,7 @@ function baseAssignmentRow(overrides = {}) {
 beforeEach(() => {
   mockSb.reset();
   mockGroqCreate.mockReset();
+  mockVisionGrade.mockReset();
   mockCloudinaryUpload.mockReset();
 });
 
@@ -61,8 +73,9 @@ describe('B04 Phase 1 — drawing/photo evidence persistence (real endpoint: ass
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm123.jpg' });
+    mockVisionGrade
+      .mockResolvedValueOnce(visionJson({ answered: true, score: 75, studentAnswer: 'A farm with rows of crops.', correct: true, comment: 'Great farm drawing!', teacherNote: 'Clear rows of crops drawn.' }));
     mockGroqCreate
-      .mockResolvedValueOnce(groqJson({ answered: true, score: 75, studentAnswer: 'A farm with rows of crops.', correct: true, comment: 'Great farm drawing!', teacherNote: 'Clear rows of crops drawn.' }))
       .mockResolvedValueOnce(groqJson({ text: 'Great job!', wellDone: 'Nice drawing', improve: 'Add more detail' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
@@ -85,8 +98,9 @@ describe('B04 Phase 1 — drawing/photo evidence persistence (real endpoint: ass
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockRejectedValue(new Error('Cloudinary quota exceeded'));
+    mockVisionGrade
+      .mockResolvedValueOnce(visionJson({ answered: true, score: 80, studentAnswer: 'A farm with animals.', correct: true, comment: 'Nice work!', teacherNote: '' }));
     mockGroqCreate
-      .mockResolvedValueOnce(groqJson({ answered: true, score: 80, studentAnswer: 'A farm with animals.', correct: true, comment: 'Nice work!', teacherNote: '' }))
       .mockResolvedValueOnce(groqJson({ text: 'Nice!', wellDone: '', improve: '' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
@@ -107,8 +121,9 @@ describe('B04 Phase 1 — drawing/photo evidence persistence (real endpoint: ass
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm999.jpg' });
     // Malformed JSON — simulates a real parse failure on the AI's response.
+    mockVisionGrade
+      .mockResolvedValueOnce('not valid json {{{');
     mockGroqCreate
-      .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }))
       .mockResolvedValueOnce(groqJson({ text: 'Great effort!' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
@@ -127,8 +142,9 @@ describe('B04 Phase 1 — drawing/photo evidence persistence (real endpoint: ass
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/farm999.jpg' });
+    mockVisionGrade
+      .mockResolvedValueOnce('not valid json {{{');
     mockGroqCreate
-      .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }))
       .mockResolvedValueOnce(groqJson({ text: 'Great effort!' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
@@ -153,9 +169,10 @@ describe('B04 Phase 1 — drawing/photo evidence persistence (real endpoint: ass
     ]);
     mockSb.setTable('assignment_submissions', { data: {}, error: null });
     mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://x/e.jpg' });
+    mockVisionGrade
+      .mockResolvedValueOnce(visionJson({ answered: true, score: 100, studentAnswer: 'x', correct: true, comment: 'x', teacherNote: '' }))
+      .mockResolvedValueOnce('not valid json {{{');
     mockGroqCreate
-      .mockResolvedValueOnce(groqJson({ answered: true, score: 100, studentAnswer: 'x', correct: true, comment: 'x', teacherNote: '' }))
-      .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: 'not valid json {{{' } }] }))
       .mockResolvedValueOnce(groqJson({ text: 'Great job!' }));
 
     const res = await request(app).post('/assignments/a1/submit').send({
