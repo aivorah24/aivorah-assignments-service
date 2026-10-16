@@ -91,3 +91,31 @@ test('no worksheet text, or a task not in it: nothing changes', () => {
   alignTasksWithSource(other, SOURCE);
   expect(other.tasks[0].questions).toHaveLength(1);
 });
+
+test('a table with two blanks per row (tens and ones) stays as questions — no guessing which answer goes where', () => {
+  const src = 'Task 1: Write the tens and ones.\n\n[TABLE - EXACT VALUES, DO NOT ALTER]\nNumber | Tens | Ones\n45 |  | \n72 |  | \n[/TABLE]\n';
+  const quiz = { tasks: [{ title: 'Task 1 · Write the tens and ones.', questions: ['45: tens', '45: ones', '72: tens', '72: ones'].map((question, i) => ({ id: String(i), question, answer: String(i), type: 'numeric' })) }] };
+  alignTasksWithSource(quiz, src);
+  expect(quiz.tasks[0].table).toBeUndefined();
+  expect(quiz.tasks[0].questions).toHaveLength(4);
+});
+
+test('another layout: comprehension passage, "Example: Bee – hive" and an Animal | Home table', () => {
+  const src = [
+    'Task 1: Read the passage and answer the questions.',
+    'Animals live in many different places. Fish live in water and breathe through gills. Birds build nests in trees to keep their eggs safe. Lions live in dens on the grassland.',
+    '1. Where do fish live?',
+    'Task 2: Write the home of each animal.',
+    'Example: Bee – hive',
+    '[TABLE - EXACT VALUES, DO NOT ALTER]', 'Animal | Home', 'Bird | ', 'Lion | ', '[/TABLE]',
+  ].join('\n');
+  const quiz = { tasks: [
+    { title: 'Task 1 · Read the passage and answer the questions.', questions: [{ id: 'a', question: 'Where do fish live?', answer: 'in water' }] },
+    { title: 'Task 2 · Write the home of each animal.', questions: [{ id: 'a', question: 'Bird', answer: 'nest' }, { id: 'b', question: 'Lion', answer: 'den' }] },
+  ] };
+  expect(alignTasksWithSource(quiz, src)).toEqual({ instructions: 0, passages: 1, examples: 1, tables: 1 });
+  expect(quiz.tasks[0].passage).toMatch(/^Animals live in many different places/);
+  expect(quiz.tasks[0].questions).toHaveLength(1);
+  expect(quiz.tasks[1].example).toBe('Bee – hive');
+  expect(quiz.tasks[1].table.rows.map(r => r[1].answer)).toEqual(['nest', 'den']);
+});

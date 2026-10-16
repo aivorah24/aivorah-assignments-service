@@ -77,4 +77,12 @@ function matchesAnyAnswer(student, answers) {
   return false;
 }
 
-module.exports = { dominantScript, requiredScript, isWrongScript, normalizeAnswer, matchesAnyAnswer };
+// Questions where the wording itself is being tested (tense, voice, plural,
+// punctuation, spelling, word forms): the exact form IS the answer, so no
+// typo or word-form allowance ("She was reading" is not "She is reading",
+// "receeve" is not "receive").
+function isFormQuestion(question) {
+  return /\b(rewrite|re-write|change|convert|correct the|correct form|tense|voice|plural|singular|punctuat\w*|spell\w*|form of|degree|article|preposition|pronoun|verb|adverb|adjective|conjunction|joining word)\b/i.test(String(question || ''));
+}
+
+module.exports = { dominantScript, requiredScript, isWrongScript, normalizeAnswer, matchesAnyAnswer, isFormQuestion };

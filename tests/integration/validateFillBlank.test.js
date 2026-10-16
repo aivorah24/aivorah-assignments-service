@@ -116,4 +116,11 @@ describe('POST /assignments/validate-fill-blank', () => {
     expect(res.status).toBe(200);
     expect(res.body.correct).toBe(false);
   });
+
+  test('a spelling or grammar blank gets no typo allowance', async () => {
+    const spell = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'receeve', correctAnswer: 'receive', question: 'Correct the spelling: recieve' });
+    const plain = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'photosynthsis', correctAnswer: 'photosynthesis', question: 'Plants make food by ___.' });
+    expect(spell.body.correct).toBe(false);
+    expect(plain.body.correct).toBe(true);
+  });
 });

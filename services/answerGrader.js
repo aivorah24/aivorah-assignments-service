@@ -26,6 +26,7 @@ async function gradeAnswerMeaning({ expected, student, question = '', acceptable
   const prompt = `You grade a primary-school student's answer. Judge MEANING, not spelling of minor words.
 Rules:
 - "correct": the same meaning as the expected answer AND complete — every part it asks for is there (both words of a two-word answer, every item of a list). Other wording, a synonym or a small spelling slip is fine.
+- When the question tests the FORM of the words (rewrite in a tense or voice, plural/singular, punctuation, spelling, the correct form of a word), the form itself is the answer: "She was reading a book" is incorrect for "She is reading a book", and so is a misspelling.
 - "incorrect": anything else — wrong, off-topic, only part of the answer (e.g. "seller" when the answer is "buyer and seller"), a word that is not in the answer ("consumer"), or a different language than the expected answer. Expected answer language: ${lang}.
 Return JSON: {"verdict":"correct|incorrect","reason":"one short, kind sentence for the student, written in ${lang}: for an incorrect answer say what is missing or wrong, without giving the answer away"}.
 

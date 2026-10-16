@@ -59,7 +59,7 @@ const cloudinary = require('cloudinary').v2;
 const crypto     = require('crypto');
 const { renderQuizHTML } = require('../utils/quizHtmlRenderer');
 const { resolveCorrectFromScore } = require('../utils/grading');
-const { normalizeAnswer, isWrongScript } = require('../utils/answerCheck');
+const { normalizeAnswer, isWrongScript, isFormQuestion } = require('../utils/answerCheck');
 const { gradeAnswerMeaning, isWordAnswer } = require('../services/answerGrader');
 
 // Written answers: a wrong answer is pointed out, never praised as correct.
@@ -3181,7 +3181,11 @@ router.post('/validate-fill-blank', async (req, res) => {
 
 // { correct, reason? } — the exact check, then the AI meaning check for words.
 async function checkFillBlank(studentAnswer, correctAnswer, question = '') {
-  if (fillBlankMatches(studentAnswer, correctAnswer)) return { correct: true };
+  // A spelling/grammar blank gets no typo allowance: only the exact word passes instantly.
+  const exact = isFormQuestion(question)
+    ? (() => { const s = normalizeAnswer(studentAnswer); return !!s && s === normalizeAnswer(correctAnswer); })()
+    : fillBlankMatches(studentAnswer, correctAnswer);
+  if (exact) return { correct: true };
   if (!isWordAnswer(correctAnswer) || isWrongScript(studentAnswer, correctAnswer, '')) return { correct: false };
   try {
     const { verdict, reason } = await gradeAnswerMeaning({ expected: correctAnswer, student: studentAnswer, question });

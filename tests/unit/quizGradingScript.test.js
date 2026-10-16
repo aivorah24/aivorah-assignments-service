@@ -32,7 +32,7 @@ test('a Telugu answer key is graded exactly (plus accepted wordings), not by Eng
   expect(a.theory).toBe(true); // goes to exact check, then the server
   expect(a.alts).toEqual(['గద్ద ఆకాశంలో ఎగురుతుంది']);
   expect(html).toContain("const latinKey = dominantScript(String(a.answer)) === 'Latin';");
-  expect(html).toContain('matchesAnyAnswer(val, keysOf(a)) || (latinKey && keywordMatch(val, String(a.answer)))');
+  expect(html).toContain('matchesAnyAnswer(val, keysOf(a)) || (latinKey && !a.exactForm && keywordMatch(val, String(a.answer)))');
 });
 
 test('a question with no answer key is recorded for teacher review instead of failing or passing silently', () => {
@@ -127,5 +127,15 @@ describe('questions with no single right answer', () => {
     const withSolution = renderQuizHTML({ tasks: [{ title: 'T', questions: [{ question: 'Capital of France?', answer: 'Paris', solution: 'Paris is the capital.', type: 'text' }] }] }, {});
     expect(withSolution).not.toMatch(/class="solution-box" data-empty/);
   });
+});
+
+test('grammar questions only pass an exact match instantly ("She was reading" is not "She is reading")', () => {
+  const html = renderQuizHTML({ tasks: [{ title: 'Grammar', questions: [
+    { question: 'Rewrite in present continuous: She reads a book.', answer: 'She is reading a book.', type: 'text' },
+    { question: 'What do plants need to make food?', answer: 'sunlight and water', type: 'text' },
+  ] }] }, {});
+  const [rewrite, science] = Object.values(answersOf(html));
+  expect(rewrite.exactForm).toBe(true);
+  expect(science.exactForm).toBe(false);
 });
 

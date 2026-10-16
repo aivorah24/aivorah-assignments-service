@@ -6,7 +6,7 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { dominantScript, requiredScript, isWrongScript, normalizeAnswer, matchesAnyAnswer } = require('./answerCheck');
+const { dominantScript, requiredScript, isWrongScript, normalizeAnswer, matchesAnyAnswer, isFormQuestion } = require('./answerCheck');
 
 function solveVerticalMath(vm) {
   if (!vm || !vm.top || !vm.bottom) return { solvable: false };
@@ -906,6 +906,10 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         alts: Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers.map(String) : [],
         // The question itself, for the AI check (the card's bold text is only the "a)" label).
         question: String(q.question || ''),
+        // Grammar tasks: the exact form IS the answer ("She was reading" is not
+        // "She is reading"), so the forgiving keyword check is off — only an
+        // exact match passes instantly, anything else goes to the AI check.
+        exactForm: isFormQuestion(q.question),
         review: !hasDefinedAnswer && (!!q.visualUnderstandingRequired || !isOpenEnded),
       };
     }
@@ -2132,7 +2136,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         // ("rewrite with the correct ottu"), so those go straight to the exact
         // check and then the server.
         const latinKey = dominantScript(String(a.answer)) === 'Latin';
-        const okTh = matchesAnyAnswer(val, keysOf(a)) || (latinKey && keywordMatch(val, String(a.answer)));
+        const okTh = matchesAnyAnswer(val, keysOf(a)) || (latinKey && !a.exactForm && keywordMatch(val, String(a.answer)));
         const elapsedTh = questionStartTimes[id] ? Math.round((Date.now() - questionStartTimes[id]) / 1000) : 0;
         if (okTh) {
           studentAnswers[id] = { answer: val, correct: true, timeSpent: elapsedTh, question: '' };

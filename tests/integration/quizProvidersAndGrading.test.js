@@ -106,6 +106,12 @@ describe('POST /quiz/grade-answer', () => {
     expect(mockGroq).not.toHaveBeenCalled();
   });
 
+  test('the AI is told that on grammar questions the form is the answer', async () => {
+    mockGroq.mockResolvedValue(groqReply({ verdict: 'incorrect', reason: 'Check the tense.' }));
+    await grade({ expected: 'She is reading a book.', student: 'She was reading a book', question: 'Rewrite in present continuous: She reads a book.' });
+    expect(mockGroq.mock.calls[0][0].messages[0].content).toMatch(/the form itself is the answer/);
+  });
+
   test('the worksheet language from the page wins (a French worksheet is also A–Z)', async () => {
     mockGroq.mockResolvedValue(groqReply({ verdict: 'incorrect', reason: 'Non.' }));
     await grade({ expected: 'le marché', student: 'la maison', language: 'French' });
