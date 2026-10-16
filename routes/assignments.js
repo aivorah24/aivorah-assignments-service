@@ -3131,7 +3131,8 @@ router.post('/validate-fill-blank', async (req, res) => {
     return res.json({ correct: !!s && s === normalizeAnswer(correctAnswer) });
   }
 
-  const normalize = s => s.toLowerCase().trim().replace(/[^a-z0-9./\s]/g, '').replace(/\s+/g, ' ');
+  // "-3" is not "3", and "4,000" is "4000".
+  const normalize = s => s.toLowerCase().trim().replace(/(\d),(?=\d{3}(\D|$))/g, '$1').replace(/[^a-z0-9./\s-]/g, '').replace(/\s+/g, ' ');
   const sNorm = normalize(String(studentAnswer));
   const cNorm = normalize(String(correctAnswer));
   if (!sNorm) return res.json({ correct: false });
@@ -3140,7 +3141,7 @@ router.post('/validate-fill-blank', async (req, res) => {
   if (sNorm === cNorm) return res.json({ correct: true });
 
   // Extract leading number/fraction from both (e.g. "4 novels" → "4", "1/2" → "1/2")
-  const extractNum = s => (s.match(/^[\d./]+/) || [''])[0];
+  const extractNum = s => (s.match(/^-?[\d./]+/) || [''])[0];
   const sNum = extractNum(sNorm);
   const cNum = extractNum(cNorm);
 

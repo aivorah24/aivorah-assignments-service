@@ -57,6 +57,14 @@ function normalizeAnswer(text) {
   if (/^(is\s+)?(greater|bigger|more|larger)\s+than$/.test(phrase)) s = '>';
   else if (/^(is\s+)?(less|smaller|fewer)\s+than$/.test(phrase)) s = '<';
   else if (/^(is\s+)?(equal\s+to|equals|the\s+same\s+as)$/.test(phrase)) s = '=';
+  // Number punctuation stays ("1.5" is not "15", "1/2" is not "12", "3:30" is
+  // not "330", "-3" is not "3", "1, 2" is not "12"), swapped for private-use
+  // characters so the strip below leaves them. Thousands commas go: "4,000" is "4000".
+  var keep = { '.': '\uE000', '/': '\uE001', ':': '\uE002' };
+  s = s.replace(/(\d),(?=\d{3}(\D|$))/g, '$1')
+    .replace(/(\d)([.\/:])(?=\d)/g, function (m, d, c) { return d + keep[c]; })
+    .replace(/(\d),\s*(?=\d)/g, '$1\uE004')
+    .replace(/(^|[^\p{L}\p{N}])-(?=\d)/gu, '$1\uE003');
   return s.replace(/[^\P{S}<>=≤≥≠]|[\p{P}\s]+/gu, '');
 }
 

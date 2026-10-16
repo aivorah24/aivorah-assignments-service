@@ -50,3 +50,43 @@ test('the server is told the worksheet script and accepted wordings', () => {
   const html = renderQuizHTML(telugu([{ question: 'q', answer: 'తామర పూలు', type: 'text' }]), {});
   expect(html).toContain('acceptableAnswers: a.alts || [], worksheetScript: WORKSHEET_SCRIPT');
 });
+
+// 2026-10-16 manual test: one shared keyword was enough ("not Paris" passed),
+// while right answers worded differently ("make" for "making") failed.
+describe('instant answer check on the worksheet page', () => {
+  const html = renderQuizHTML({ tasks: [{ title: 'Answer', questions: [{ question: 'Capital of France?', answer: 'Paris', type: 'text' }] }] }, {});
+  const block = html.slice(html.indexOf('const STOPWORDS'), html.indexOf('// Track when each question'));
+  const toNumberSrc = html.match(/function toNumber\(v\) \{.*\}/)[0];
+  // eslint-disable-next-line no-new-func
+  const { keywordMatch, toNumber } = new Function(`${block}\n${toNumberSrc}\nreturn { keywordMatch, toNumber };`)();
+
+  test.each([
+    ['Paris', 'The answer is Paris.'], ['Paris', 'I think it is paris'], ['Paris', 'Parris'],
+    ['football and hockey', 'Footballs & Hockey'], ['tilling, making seedbeds and sowing', 'till, make seedbeds and sow'],
+    ['Plants need sunlight and water', 'plant needs water and sunlight'],
+    ['Yes, because 9/12 is more than 8/12.', 'yes because 9/12 is more than 8/12'],
+  ])('right answer in other words: "%s" ← "%s"', (key, typed) => {
+    expect(keywordMatch(typed, key)).toBe(true);
+  });
+
+  test.each([
+    ['Paris', 'not Paris'], ['Paris', 'Paris and London'], ['Paris', 'Parks'],
+    ['football and hockey', 'football'], ['football and hockey', 'football and swimming'],
+    ['tilling, making seedbeds and sowing', 'tilling and sowing'],
+    ['Plants need sunlight and water', 'plants do not need sunlight and water'],
+    ['Yes, because 9/12 is more than 8/12.', 'Yes'], ['Yes, because 9/12 is more than 8/12.', 'Yes, because 5/12 is more than 8/12'],
+  ])('not accepted instantly (wrong, or for the AI to judge): "%s" ← "%s"', (key, typed) => {
+    expect(keywordMatch(typed, key)).toBe(false);
+  });
+
+  test('number answers read thousands separators', () => {
+    expect(toNumber('4,000')).toBe(4000);
+    expect(toNumber('1,000,000')).toBe(1000000);
+    expect(toNumber('4000.5')).toBe(4000.5);
+  });
+
+  test('when the AI meaning check cannot run, the answer goes to the teacher instead of being marked wrong', () => {
+    expect(html).toContain("needsReview: true };");
+    expect(html).toContain('Answer recorded — your teacher will check it');
+  });
+});

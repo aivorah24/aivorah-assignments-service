@@ -71,4 +71,11 @@ describe('POST /assignments/validate-fill-blank', () => {
     expect(wrong.body.correct).toBe(false);
     expect(ok.body.correct).toBe(true);
   });
+
+  test('a negative number is not its positive, and thousands commas are read', async () => {
+    const neg = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '3', correctAnswer: '-3' });
+    const thou = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '4,000', correctAnswer: '4000' });
+    expect(neg.body.correct).toBe(false);
+    expect(thou.body.correct).toBe(true);
+  });
 });

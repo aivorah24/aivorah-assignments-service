@@ -73,3 +73,16 @@ describe('comparison signs (> < =)', () => {
   });
 });
 
+
+describe('number punctuation', () => {
+  test('signs that change a value are kept; thousands commas are not', () => {
+    expect(matchesAnyAnswer('12', ['1/2'])).toBe(false);
+    expect(matchesAnyAnswer('15 kg', ['1.5 kg'])).toBe(false);
+    expect(matchesAnyAnswer('3', ['-3'])).toBe(false);
+    expect(matchesAnyAnswer('330', ['3:30'])).toBe(false);
+    expect(matchesAnyAnswer('12', ['1,2'])).toBe(false);
+    expect(matchesAnyAnswer('4,000', ['4000'])).toBe(true);
+    expect(matchesAnyAnswer('1.5kg', ['1.5 kg'])).toBe(true);
+    expect(matchesAnyAnswer('1, 2', ['1,2'])).toBe(true);
+  });
+});

@@ -1884,6 +1884,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         .replace(/[*][*](.+?)[*][*]/g, '<strong>$1</strong>');
     }
+    // "4,000" and "4 000" are 4000; a decimal point is left alone.
+    function toNumber(v) { return parseFloat(String(v).replace(/(\\d)[,\\s](?=\\d{3}(\\D|$))/g, '$1')); }
     function keysOf(a) { return [a.answer].concat(a.alts || []).filter(function(x) { return x != null && String(x).trim(); }).map(String); }
     let sc = 0;
     const tot = ${qNum};
@@ -1937,34 +1939,60 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // first couple of sentences fixes both problems at once.
       const sentences = correctAnswer.split(/(?<=[.!?])\\s+/).filter(Boolean);
       const answerSource = sentences.length > 2 ? sentences.slice(0, 2).join(' ') : correctAnswer;
-      // Bare numbers (e.g. an intermediate computed value like "20" restated inside
-      // "20, closer to football") are narrative filler, not something a student must
-      // retype to prove correct reasoning — a purely numeric answer already goes
-      // through the isNum exact-match path, so any stray digit token reaching HERE is
-      // incidental. Drop it, otherwise a correct short answer ("football") gets
-      // penalized for not repeating a number the question never asked for.
-      const stripNums = (set) => new Set(Array.from(set).filter(function(w) { return !/^\\d+$/.test(w); }));
-      const expected = Array.from(stripNums(keywordSet(answerSource)));
+      // Bare numbers in the key (e.g. "20" restated inside "20, closer to football")
+      // are narrative, not something a student must retype — but a number the
+      // student adds must be one the key has.
+      const isNumTok = function(w) { return /^\\d+$/.test(w); };
+      const expected = Array.from(keywordSet(answerSource)).filter(function(w) { return !isNumTok(w); });
       if (expected.length === 0) return true; // nothing meaningful to check against
-      const studentSet = stripNums(keywordSet(studentAnswer));
-      const matched = expected.filter(function(w) { return studentSet.has(w); }).length;
-      // Short answers (≤3 meaningful words, e.g. "rugby and badminton") still need
-      // majority overlap for real discrimination. Anything longer than that — even
-      // after narrowing to the first couple of sentences — is asking more than a
-      // short answer box should require verbatim, so a single genuine keyword
-      // overlap (already scoped to the decisive sentences, so "hockey" can't sneak
-      // in from the justification) is accepted. A stricter near-100% threshold
-      // marked genuinely correct short answers wrong; a lower bar costs a rare
-      // false positive, which is a far smaller problem live than telling a student
-      // their right answer is wrong.
-      //
-      // Require just ONE genuine keyword overlap, uniformly. The old
-      // "ceil(len*0.5) for lists ≤3" rule was NON-MONOTONIC — a 3-keyword answer
-      // demanded 2 matches while 2-keyword AND 4+-keyword answers needed only 1,
-      // so "market" (1 of 2) passed but "production" (1 of 3) failed for the same
-      // one-word effort. One valid keyword now passes at every list length.
-      const required = 1;
-      return matched >= required;
+      const keyWords = keywordSet(correctAnswer);
+      const studentWords = Array.from(keywordSet(studentAnswer));
+      // This instant check accepts an answer that is clearly right, however it is
+      // worded: every keyword of the decisive answer is there (plurals, word forms
+      // and a small typo count), and nothing is added that changes it — no "not",
+      // no extra item ("Paris and London"), no number the answer key doesn't have.
+      // One shared keyword used to be enough, so "not Paris" and a bare "Yes" for an
+      // explain question were marked correct. A right answer in other words goes on
+      // to the AI meaning check, which can also give part credit.
+      const missing = expected.some(function(w) { return !studentWords.some(function(x) { return sameWord(x, w); }); });
+      const extra = studentWords.some(function(x) {
+        if (FILLER.has(x)) return false;
+        if (isNumTok(x)) return !keyWords.has(x);
+        return !Array.from(keyWords).some(function(w) { return sameWord(x, w); });
+      });
+      return !missing && !extra;
+    }
+    // Words a student wraps around a right answer that don't change it.
+    const FILLER = new Set(['i', 'think', 'answer', 'my', 'its', 'so', 'called', 'named', 'also', 'just', 'both', 'we', 'they', 'there', 'he', 'she', 'you']);
+    // Forms of a Latin word a student might write: "plants" / "plant",
+    // "making" / "make", "running" / "run", "boxes" / "box", "stories" / "story".
+    function wordForms(w) {
+      if (!/^[a-z]+$/.test(w) || w.length < 4) return [w];
+      if (/ies$/.test(w)) return [w.slice(0, -3) + 'y'];
+      if (/(ing|ed)$/.test(w) && w.length > 5) {
+        const base = w.replace(/(ing|ed)$/, '');
+        const forms = [base, base + 'e'];
+        if (/([b-df-hj-np-tv-z])\\1$/.test(base)) forms.push(base.slice(0, -1));
+        return forms;
+      }
+      if (/(s|x|ch|sh)es$/.test(w)) return [w.slice(0, -2)];
+      if (/[^s]s$/.test(w)) return [w.slice(0, -1)];
+      return [w];
+    }
+    function editDistance(a, b) {
+      const d = [];
+      for (let i = 0; i <= a.length; i++) { d[i] = [i]; for (let j = 1; j <= b.length; j++) d[i][j] = i === 0 ? j : 0; }
+      for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+        d[i][j] = a[i - 1] === b[j - 1] ? d[i - 1][j - 1] : 1 + Math.min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1]);
+      return d[a.length][b.length];
+    }
+    // Same word: equal, another form of it, or one slip in a longer Latin word ("Parris").
+    // Short words must match exactly, so "Parks" is not "Paris".
+    function sameWord(x, w) {
+      if (x === w) return true;
+      const wf = wordForms(w);
+      if (wordForms(x).some(function(f) { return wf.indexOf(f) >= 0; })) return true;
+      return /^[a-z]+$/.test(x) && /^[a-z]+$/.test(w) && x[0] === w[0] && Math.max(x.length, w.length) >= 6 && editDistance(x, w) <= 1;
     }
 
     // Track when each question becomes visible / gets focus
@@ -1989,6 +2017,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       const answersArr = Object.entries(studentAnswers).map(([qId, data]) => ({
         // NFC so the same word typed on different keyboards/IMEs is stored identically.
         qId, answer: typeof data.answer === 'string' ? data.answer.normalize('NFC') : data.answer, correct: data.correct,
+        needsReview: !!data.needsReview,
         timeSpent: data.timeSpent || 0,
         question: data.question || ''
       }));
@@ -2072,7 +2101,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         // valid (or partially valid) paraphrase Tier 1's keyword overlap
         // couldn't recognize. Three-way verdict: correct / partial / incorrect.
         r.innerHTML = '<span style="color:#A8B5B3;font-weight:600">Checking...</span>';
-        let semanticResult = { verdict: 'incorrect', reason: '' };
+        let semanticResult = null;
         try {
           const qEl0 = document.getElementById(id + '-card');
           const qText0 = qEl0 ? (qEl0.querySelector('.q-label, strong')?.textContent || '') : '';
@@ -2081,7 +2110,18 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
             body: JSON.stringify({ expected: String(a.answer), student: val, question: qText0, acceptableAnswers: a.alts || [], worksheetScript: WORKSHEET_SCRIPT }),
           });
           if (gRes.ok) semanticResult = await gRes.json();
-        } catch (e) { /* network hiccup — fall back to Tier 1's "wrong" */ }
+        } catch (e) { /* network hiccup — handled below */ }
+        // The meaning check could not run (offline / AI down): we can't tell if
+        // this answer is right, so it is never shown as wrong — it is recorded
+        // for the teacher instead.
+        if (!semanticResult) {
+          studentAnswers[id] = { answer: val, correct: false, timeSpent: elapsedTh, question: '', needsReview: true };
+          attempted.add(id);
+          r.innerHTML = '<span style="color:#C5BD96;font-weight:700">&#10004; Answer recorded — your teacher will check it</span>';
+          inp.style.borderColor = '#C5BD96';
+          up();
+          return;
+        }
         const verdict = semanticResult.verdict || 'incorrect';
         studentAnswers[id] = { answer: val, correct: verdict !== 'incorrect', partial: verdict === 'partial', timeSpent: elapsedTh, question: '' };
         attempted.add(id);
@@ -2110,7 +2150,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       }
       let ok = false;
       if (a.isNum) {
-        const v = parseFloat(val);
+        const v = toNumber(val);
         if (isNaN(v)) { inp.style.borderColor = '#C5BD96'; return; }
         ok = a.range ? (v >= a.range[0] && v <= a.range[1]) : Math.abs(v - a.answer) < 0.01;
       } else {
@@ -2397,7 +2437,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       if (!val) return;
       var ok;
       if (a.isNum) {
-        var v = parseFloat(val);
+        var v = toNumber(val);
         ok = !isNaN(v) && (a.range ? (v >= a.range[0] && v <= a.range[1]) : Math.abs(v - a.answer) < 0.01);
       } else {
         ok = matchesAnyAnswer(val, [String(a.answer)]);

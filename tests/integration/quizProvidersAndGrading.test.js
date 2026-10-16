@@ -70,8 +70,17 @@ describe('POST /quiz/grade-answer', () => {
     expect(prompt).toContain('Student answer: సరస్సుకు');
   });
 
+  test('Groq down: Gemini judges instead, so a right answer in other words still passes', async () => {
+    mockGroq.mockRejectedValue(new Error('429 rate limit'));
+    mockGemini.mockResolvedValue({ response: { text: () => JSON.stringify({ verdict: 'correct', reason: 'Yes!' }) } });
+    const res = await grade({ expected: 'Plants make their own food using sunlight', student: 'they use light from the sun to make food' });
+    expect(res.status).toBe(200);
+    expect(res.body.verdict).toBe('correct');
+  });
+
   test('grading unavailable → 503 with an incorrect verdict, never a false "correct"', async () => {
     mockGroq.mockRejectedValue(new Error('network'));
+    mockGemini.mockRejectedValue(new Error('503 overloaded'));
     const res = await grade({ expected: 'photosynthesis', student: 'plants make food' });
     expect(res.status).toBe(503);
     expect(res.body.verdict).toBe('incorrect');

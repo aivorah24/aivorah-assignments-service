@@ -87,8 +87,19 @@ Return JSON: {"verdict":"correct|partial|incorrect","reason":"one short, kind se
 Question: ${String(question).slice(0, 600)}
 Expected answer: ${String(expected).slice(0, 1000)}
 ${keys.length > 1 ? `Also acceptable: ${keys.slice(1).join(' / ').slice(0, 600)}\n` : ''}Student answer: ${studentText}`;
-    const raw = await callGroqWithText(prompt, { maxTokens: 800 });
-    const parsed = JSON.parse(raw);
+    let raw;
+    try {
+      raw = await callGroqWithText(prompt, { maxTokens: 800 });
+    } catch (groqErr) {
+      // Groq down or rate-limited: a right answer must not turn "wrong" because
+      // of it, so Gemini judges instead.
+      if (!process.env.GEMINI_API_KEY) throw groqErr;
+      console.warn('[quiz/grade-answer] Groq failed, using Gemini:', groqErr.message);
+      const { geminiModel } = require('../services/quizVision');
+      const result = await geminiModel({ responseMimeType: 'application/json', temperature: 0 }).generateContent([{ text: prompt }]);
+      raw = result.response.text();
+    }
+    const parsed = JSON.parse(String(raw).match(/\{[\s\S]*\}/)?.[0] || raw);
     const verdict = ['correct', 'partial', 'incorrect'].includes(parsed.verdict) ? parsed.verdict : 'incorrect';
     res.json({ verdict, reason: String(parsed.reason || '').slice(0, 300) });
   } catch (err) {
