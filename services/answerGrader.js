@@ -33,6 +33,31 @@ Question: ${String(question).slice(0, 600)}
 Expected answer: ${String(expected).slice(0, 1000)}
 ${keys.length > 1 ? `Also acceptable: ${keys.slice(1).join(' / ').slice(0, 600)}\n` : ''}Student answer: ${String(student).slice(0, 2000)}`;
 
+  const parsed = JSON.parse(await askModel(prompt));
+  // Only a complete, correct answer counts; anything else (an old "partial" too) is wrong.
+  const verdict = parsed.verdict === 'correct' ? 'correct' : 'incorrect';
+  return { verdict, reason: String(parsed.reason || '').slice(0, 300) };
+}
+
+// A question with no single right answer (reflection, opinion, "write your
+// own sentence"): any genuine attempt counts, but gibberish, a copy of the
+// question or an off-topic reply does not.
+async function gradeOpenAnswer({ student, question = '', language = '' }) {
+  const lang = String(language || '').trim() || 'English';
+  const prompt = `A primary-school student answered a question that has no single right answer (a reflection, an opinion or their own sentence).
+Decide only whether it is a GENUINE attempt at THIS question. Do not judge spelling, grammar or how good the idea is.
+- "correct": real words that try to answer the question, even briefly or with mistakes.
+- "incorrect": random letters or keyboard-mashing ("hoepef ewwjfwejfeo"), a copy of the question, something unrelated to the question, or not written in ${lang}.
+Return JSON: {"verdict":"correct|incorrect","reason":"one short, kind sentence for the student, written in ${lang}; for incorrect, say what to do"}.
+
+Question: ${String(question).slice(0, 600)}
+Student answer: ${String(student).slice(0, 2000)}`;
+  const parsed = JSON.parse(await askModel(prompt));
+  return { verdict: parsed.verdict === 'correct' ? 'correct' : 'incorrect', reason: String(parsed.reason || '').slice(0, 300) };
+}
+
+// Groq first; Gemini if Groq is down. Returns the model's JSON text.
+async function askModel(prompt) {
   let raw;
   try {
     const { callGroqWithText } = require('./quizVision');
@@ -46,10 +71,7 @@ ${keys.length > 1 ? `Also acceptable: ${keys.slice(1).join(' / ').slice(0, 600)}
     const result = await geminiModel({ responseMimeType: 'application/json', temperature: 0 }).generateContent([{ text: prompt }]);
     raw = result.response.text();
   }
-  const parsed = JSON.parse(String(raw).match(/\{[\s\S]*\}/)?.[0] || raw);
-  // Only a complete, correct answer counts; anything else (an old "partial" too) is wrong.
-  const verdict = parsed.verdict === 'correct' ? 'correct' : 'incorrect';
-  return { verdict, reason: String(parsed.reason || '').slice(0, 300) };
+  return String(raw).match(/\{[\s\S]*\}/)?.[0] || raw;
 }
 
 // Fill-in-the-blank answers worth asking the AI about: words, not numbers or
@@ -58,4 +80,4 @@ function isWordAnswer(expected) {
   return /\p{L}/u.test(String(expected)) && !/\d|[<>=≤≥≠]/.test(String(expected));
 }
 
-module.exports = { gradeAnswerMeaning, isWordAnswer, answerLanguage };
+module.exports = { gradeAnswerMeaning, gradeOpenAnswer, isWordAnswer, answerLanguage };

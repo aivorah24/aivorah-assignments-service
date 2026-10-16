@@ -74,9 +74,14 @@ router.post('/grade-answer', express.json({ limit: '64kb' }), async (req, res) =
     return res.json({ verdict: 'incorrect', reason: `Please write your answer in ${requiredScript(expected, worksheetScript)} script.` });
   }
   if (matchesAnyAnswer(studentText, keys)) return res.json({ verdict: 'correct', reason: '' });
-  if (!String(expected).trim()) return res.json({ verdict: 'incorrect', reason: '' }); // nothing to judge against
   try {
-    const { gradeAnswerMeaning } = require('../services/answerGrader');
+    const { gradeAnswerMeaning, gradeOpenAnswer } = require('../services/answerGrader');
+    // No answer key: a question with no single right answer — any genuine
+    // attempt at it counts (gibberish and off-topic replies don't).
+    if (!String(expected).trim()) {
+      if (!String(question).trim()) return res.json({ verdict: 'incorrect', reason: '' }); // nothing to judge against
+      return res.json(await gradeOpenAnswer({ student: studentText, question, language }));
+    }
     res.json(await gradeAnswerMeaning({ expected, student: studentText, question, acceptableAnswers: keys.slice(1), language }));
   } catch (err) {
     console.warn('[quiz/grade-answer] grading failed:', err.message);

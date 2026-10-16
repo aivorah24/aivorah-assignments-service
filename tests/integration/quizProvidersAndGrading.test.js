@@ -87,6 +87,25 @@ describe('POST /quiz/grade-answer', () => {
     expect(mockGroq.mock.calls[0][0].messages[0].content).toMatch(/only part of the answer/);
   });
 
+  test('a question with no answer key: a genuine attempt is correct, gibberish is not', async () => {
+    const Q = 'Why is it important to use the correct economic terms in a sentence?';
+    mockGroq.mockResolvedValueOnce(groqReply({ verdict: 'incorrect', reason: 'Please write a real sentence.' }));
+    const bad = await grade({ expected: '', student: 'hoepef ewwjfwejfeo oejfokefpwek', question: Q });
+    expect(bad.body.verdict).toBe('incorrect');
+    const prompt = mockGroq.mock.calls[0][0].messages[0].content;
+    expect(prompt).toContain(`Question: ${Q}`);
+    expect(prompt).toMatch(/keyboard-mashing/);
+    mockGroq.mockResolvedValueOnce(groqReply({ verdict: 'correct', reason: '' }));
+    const good = await grade({ expected: '', student: 'So people know what we mean.', question: Q });
+    expect(good.body.verdict).toBe('correct');
+  });
+
+  test('no answer key and no question: nothing to judge against', async () => {
+    const res = await grade({ expected: '', student: 'anything' });
+    expect(res.body.verdict).toBe('incorrect');
+    expect(mockGroq).not.toHaveBeenCalled();
+  });
+
   test('the worksheet language from the page wins (a French worksheet is also A–Z)', async () => {
     mockGroq.mockResolvedValue(groqReply({ verdict: 'incorrect', reason: 'Non.' }));
     await grade({ expected: 'le marché', student: 'la maison', language: 'French' });

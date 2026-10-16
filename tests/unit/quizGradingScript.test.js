@@ -106,3 +106,26 @@ test('header: curriculum as text, subject alone, no level label in the title', (
   expect(html).toMatch(/Subject: Language &nbsp;\|/);
 });
 
+// 2026-10-16: "hoepef ewwjfwejfeo" was "Answer recorded ✔" on a reflection
+// question, under an empty "Solution" panel.
+describe('questions with no single right answer', () => {
+  const Q = 'Why is it important to use the correct economic terms in a sentence?';
+  const html = renderQuizHTML({ tasks: [{ title: 'Task 5', questions: [{ question: Q, type: 'long' }] }] }, {});
+
+  test('the answer is checked as a real attempt at the question before it is recorded', () => {
+    const a = Object.values(answersOf(html))[0];
+    expect(a.open).toBe(true);
+    expect(a.question).toBe(Q);
+    const open = html.slice(html.indexOf('if (a.open) {'));
+    expect(open.indexOf("expected: '', student: val, question: a.question")).toBeGreaterThan(-1);
+    expect(open.indexOf("expected: '', student: val")).toBeLessThan(open.indexOf('Answer recorded'));
+  });
+
+  test('an empty solution box is never shown; one with a solution still is', () => {
+    expect(html).toMatch(/class="solution-box" data-empty="1"/);
+    expect(html).toContain('.solution-box[data-empty] { display: none !important; }');
+    const withSolution = renderQuizHTML({ tasks: [{ title: 'T', questions: [{ question: 'Capital of France?', answer: 'Paris', solution: 'Paris is the capital.', type: 'text' }] }] }, {});
+    expect(withSolution).not.toMatch(/class="solution-box" data-empty/);
+  });
+});
+

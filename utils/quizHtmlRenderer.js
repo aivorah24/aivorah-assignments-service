@@ -617,6 +617,13 @@ function resolveQuizLanguage(quiz) {
 // ("PYP: 4", "Grade 4") is not part of its title — the grade is shown above
 // it. A subject read together with the next label ("Language Purpose: …")
 // keeps only the subject.
+// A solution box with nothing in it (an open question has no model answer)
+// is never shown — it used to open as an empty "✅ Solution" panel.
+function markEmptySolutions(html) {
+  return html.replace(/<div id="([^"]+)-solution" class="solution-box"([^>]*)>([\s\S]*?)<\/div>/g, (m, id, attrs, inner) =>
+    (inner.replace(/<[^>]+>|&#9989;|Solution|\s/g, '') ? m : `<div id="${id}-solution" class="solution-box" data-empty="1"${attrs}>${inner}</div>`));
+}
+
 function headerTitle(title) {
   const t = String(title || '').trim();
   const stripped = t.replace(/^(?:pyp|myp|dp|grade|class|std\.?|standard|year|kg)\s*[:\-]?\s*\d+\s*[:\-–·|]?\s*/i, '');
@@ -897,6 +904,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         // is pointed out instead of being accepted just for being attempted.
         open: isOpenEnded || !hasDefinedAnswer, theory: isTheory || (isExplanatory && hasDefinedAnswer),
         alts: Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers.map(String) : [],
+        // The question itself, for the AI check (the card's bold text is only the "a)" label).
+        question: String(q.question || ''),
         review: !hasDefinedAnswer && (!!q.visualUnderstandingRequired || !isOpenEnded),
       };
     }
@@ -1622,6 +1631,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       `</div>`;
   }
 
+  tasksHTML = markEmptySolutions(tasksHTML);
+
   return `<!DOCTYPE html>
 <html lang="${htmlLang}">
 <head>
@@ -1744,6 +1755,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     .hint-box { margin-top: 12px; padding: 14px 16px; background: rgba(197,189,150,0.1); border-radius: 8px;
                 border-left: 4px solid #C5BD96; color: #C5BD96; font-size: 14px; line-height: 1.5; }
     .result-box { margin-top: 8px; font-size: 14px; min-height: 6px; }
+    .solution-box[data-empty] { display: none !important; }
     .solution-box { margin-top: 12px; padding: 16px 18px; background: rgba(74,157,110,0.14); border-radius: 8px;
                     border-left: 4px solid #4a9d6e; color: #4a9d6e; font-size: 14px; line-height: 1.7; }
 
@@ -2070,9 +2082,31 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       // response counts as answered, so completion isn't blocked waiting for an exact match.
       if (a.open) {
         const elapsedOpen = questionStartTimes[id] ? Math.round((Date.now() - questionStartTimes[id]) / 1000) : 0;
-        studentAnswers[id] = { answer: val, correct: true, timeSpent: elapsedOpen, question: '', needsReview: !!a.review };
+        // No single right answer, but it must be a real attempt at the question:
+        // gibberish, a copy of the question or an off-topic reply is not accepted.
+        r.innerHTML = '<span style="color:#A8B5B3;font-weight:600">Checking...</span>';
+        let openResult = null;
+        try {
+          const oRes = await fetch(API_BASE + '/quiz/grade-answer', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ expected: '', student: val, question: a.question || '', worksheetScript: WORKSHEET_SCRIPT, language: WORKSHEET_LANGUAGE }),
+          });
+          if (oRes.ok) openResult = await oRes.json();
+        } catch (e) { /* offline — the teacher checks it */ }
+        if (openResult && openResult.verdict !== 'correct') {
+          studentAnswers[id] = { answer: val, correct: false, timeSpent: elapsedOpen, question: '' };
+          attempted.add(id);
+          r.innerHTML = '<span style="color:#c9605f;font-weight:700">This doesn&#39;t answer the question. Try again!</span>' + (openResult.reason ? '<div style="font-size:12px;color:#A8B5B3;margin-top:4px;">' + fmt(openResult.reason) + '</div>' : '');
+          inp.style.borderColor = '#c9605f';
+          inp.style.background = '';
+          up();
+          return;
+        }
+        // Could not be checked (offline / AI down): recorded for the teacher.
+        const openReview = !!a.review || !openResult;
+        studentAnswers[id] = { answer: val, correct: true, timeSpent: elapsedOpen, question: '', needsReview: openReview };
         attempted.add(id);
-        r.innerHTML = a.review
+        r.innerHTML = openReview
           ? '<span style="color:#C5BD96;font-weight:700">&#10004; Answer recorded — your teacher will check it</span>'
           : '<span style="color:#4a9d6e;font-weight:700">&#10004; Answer recorded</span>';
         inp.style.borderColor = '#4a9d6e';
@@ -2119,7 +2153,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         let semanticResult = null;
         try {
           const qEl0 = document.getElementById(id + '-card');
-          const qText0 = qEl0 ? (qEl0.querySelector('.q-label, strong')?.textContent || '') : '';
+          const qText0 = a.question || (qEl0 ? (qEl0.querySelector('.q-label, strong')?.textContent || '') : '');
           const gRes = await fetch(API_BASE + '/quiz/grade-answer', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ expected: String(a.answer), student: val, question: qText0, acceptableAnswers: a.alts || [], worksheetScript: WORKSHEET_SCRIPT, language: WORKSHEET_LANGUAGE }),
