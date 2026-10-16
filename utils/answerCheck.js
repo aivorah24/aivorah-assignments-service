@@ -45,10 +45,19 @@ function isWrongScript(student, expected, worksheetScript) {
   return !!got && got !== need;
 }
 
-// For comparison: NFC, case-folded, punctuation and spaces removed.
+// For comparison: NFC, case-folded, punctuation and spaces removed. In a
+// "> < or =" activity the sign IS the answer, so comparison signs are kept
+// (other symbols are still stripped) and their spellings unified: ">=" / "≥",
+// "&gt;" / ">", "greater than" / ">".
 function normalizeAnswer(text) {
-  return String(text == null ? '' : text).normalize('NFC').toLowerCase()
-    .replace(/[\p{P}\p{S}\s]+/gu, '');
+  var s = String(text == null ? '' : text).normalize('NFC').toLowerCase()
+    .replace(/&gt;/g, '>').replace(/&lt;/g, '<')
+    .replace(/>=|⩾/g, '≥').replace(/<=|⩽/g, '≤').replace(/!=|=\/=/g, '≠');
+  var phrase = s.trim().replace(/[.!]+$/, '');
+  if (/^(is\s+)?(greater|bigger|more|larger)\s+than$/.test(phrase)) s = '>';
+  else if (/^(is\s+)?(less|smaller|fewer)\s+than$/.test(phrase)) s = '<';
+  else if (/^(is\s+)?(equal\s+to|equals|the\s+same\s+as)$/.test(phrase)) s = '=';
+  return s.replace(/[^\P{S}<>=≤≥≠]|[\p{P}\s]+/gu, '');
 }
 
 function matchesAnyAnswer(student, answers) {

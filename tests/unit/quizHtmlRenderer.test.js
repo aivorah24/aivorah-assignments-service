@@ -150,8 +150,16 @@ describe('solution formatting and explanation questions', () => {
     'Can three 900 ml bottles be poured into a 2900 l jar? Explain.',
     'Is 3/4 bigger than 2/3? Justify your answer.',
     'Solve 12 × 4 and show your thinking.',
-  ])('"%s" accepts any genuine attempt (open-ended) instead of exact match', (question) => {
+  ])('"%s" with an answer key is checked by meaning (not exact match), so a wrong answer is pointed out', (question) => {
     const html = render({ type: 'text', question, answer: 'Yes, because 2700 ml is less than 2900 l.', solution: 'x' });
+    const a = answersOf(html).q1;
+    expect(a.open).toBeFalsy();
+    expect(a.theory).toBe(true);
+    expect(a.isNum).toBe(false);
+  });
+
+  test('an explain question with no answer key is open-ended (nothing to check against)', () => {
+    const html = render({ type: 'text', question: 'Explain why you like rain.', answer: '', solution: '' });
     expect(answersOf(html).q1.open).toBe(true);
   });
 

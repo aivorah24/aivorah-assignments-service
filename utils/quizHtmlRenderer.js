@@ -861,11 +861,10 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     // "Identify the mistake / write the correct working / explain what went wrong"
     // questions are open-ended reflection tasks: the student writes free-form
     // multi-line working + reasoning (e.g. "203 - 057 ----- 146"), never a single
-    // exact string. Exact/numeric matching wrongly rejects a correct working, and
-    // even AI semantic grading is unreliable/harsh for a young child's phrasing.
-    // Industry norm (Khan Academy, Google) is to ACCEPT any genuine attempt and
-    // reveal the worked solution to learn from — so route these to the open-ended
-    // path (auto-accept once attempted + show solution), never a hard red fail.
+    // exact string, so exact/numeric matching would wrongly reject a correct
+    // working. With an answer key they take the theory path below (keywords, then
+    // the AI meaning check, with partial credit) — only a correct answer is
+    // accepted. Without a key there is nothing to check against: open-ended.
     const isExplanatory = /\b(identify the mistake|what went wrong|correct working|explain|justify|show your (thinking|working)|give (a )?reasons?|describe (how|why)|find the error)\b/i.test(q.question || '');
 
     if (isMcq) {
@@ -879,7 +878,10 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
         answer: ansRaw, isNum: isNum && !isExplanatory, range: q.acceptRange || null,
         // No answer key at all → record it (a strict compare against "" could
         // never pass); unless it's a genuinely open prompt, the teacher reviews it.
-        open: isOpenEnded || isExplanatory || !hasDefinedAnswer, theory: isTheory && !isExplanatory,
+        // An explain/find-the-error question WITH an answer key is checked like a
+        // theory answer (keywords, then the AI meaning check), so a wrong answer
+        // is pointed out instead of being accepted just for being attempted.
+        open: isOpenEnded || !hasDefinedAnswer, theory: isTheory || (isExplanatory && hasDefinedAnswer),
         alts: Array.isArray(q.acceptableAnswers) ? q.acceptableAnswers.map(String) : [],
         review: !hasDefinedAnswer && (!!q.visualUnderstandingRequired || !isOpenEnded),
       };

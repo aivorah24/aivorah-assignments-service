@@ -46,3 +46,30 @@ describe('normalizeAnswer / matchesAnyAnswer', () => {
     expect(matchesAnyAnswer('', ['x'])).toBe(false);
   });
 });
+
+// Upload Worksheet "> < or =" activity: the sign is the whole answer, so
+// stripping symbols turned every choice into "" and marked correct ones wrong.
+describe('comparison signs (> < =)', () => {
+  test('the correct sign matches; a different sign does not', () => {
+    expect(matchesAnyAnswer('>', ['>'])).toBe(true);
+    expect(matchesAnyAnswer('<', ['<'])).toBe(true);
+    expect(matchesAnyAnswer('=', ['='])).toBe(true);
+    expect(matchesAnyAnswer('<', ['>'])).toBe(false);
+    expect(matchesAnyAnswer('=', ['<'])).toBe(false);
+  });
+
+  test('other spellings of the same sign match', () => {
+    expect(matchesAnyAnswer(' > ', ['&gt;'])).toBe(true);
+    expect(matchesAnyAnswer('greater than', ['>'])).toBe(true);
+    expect(matchesAnyAnswer('<', ['is less than'])).toBe(true);
+    expect(matchesAnyAnswer('equal to', ['='])).toBe(true);
+    expect(matchesAnyAnswer('>=', ['≥'])).toBe(true);
+    expect(matchesAnyAnswer('≥', ['>'])).toBe(false);
+  });
+
+  test('a whole comparison keeps its sign', () => {
+    expect(matchesAnyAnswer('3/4 > 2/3', ['3/4>2/3'])).toBe(true);
+    expect(matchesAnyAnswer('3/4 < 2/3', ['3/4 > 2/3'])).toBe(false);
+  });
+});
+
