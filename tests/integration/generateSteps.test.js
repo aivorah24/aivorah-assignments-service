@@ -75,3 +75,62 @@ describe('POST /assignments/generate-steps — real failure handling', () => {
     expect(res.body.error).toMatch(/invalid structure/);
   });
 });
+
+describe('POST /assignments/generate-steps — partial replies (first tap gave only "Brainstorm")', () => {
+  test('leaves the reasoning model room to finish all 3 steps', async () => {
+    mockGroqCreate.mockResolvedValue(groqJson({
+      brainstorm: { label: 'B', instructions: 'b' }, drawing: { label: 'D', instructions: 'd' }, structured_writing: { label: 'W', instructions: 'w' },
+    }));
+    await request(app).post('/assignments/generate-steps').send({ topic: 'Plants', curriculum: 'CBSE' });
+    expect(mockGroqCreate.mock.calls[0][0].max_tokens).toBeGreaterThanOrEqual(2000);
+  });
+
+  test('a reply missing steps is retried once and the missing steps are filled from the retry', async () => {
+    mockGroqCreate
+      .mockResolvedValueOnce(groqJson({ brainstorm: { label: 'Ideas', instructions: 'List ideas.' } }))
+      .mockResolvedValueOnce(groqJson({
+        brainstorm: { label: 'Other ideas', instructions: 'x' },
+        drawing: { label: 'Draw it', instructions: 'Draw a plant.' },
+        structured_writing: { label: 'Write', instructions: 'Write about plants.' },
+      }));
+
+    const res = await request(app).post('/assignments/generate-steps').send({ topic: 'Plants', curriculum: 'CBSE' });
+
+    expect(res.status).toBe(200);
+    expect(mockGroqCreate).toHaveBeenCalledTimes(2);
+    expect(res.body.steps.map(s => s.label)).toEqual(['Ideas', 'Draw it', 'Write']);
+  });
+
+  test('a truncated (unparseable) reply is retried instead of failing', async () => {
+    mockGroqCreate
+      .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: '{"brainstorm": {"label": "Ide' } }] }))
+      .mockResolvedValueOnce(groqJson({
+        brainstorm: { label: 'B', instructions: 'b' }, drawing: { label: 'D', instructions: 'd' }, structured_writing: { label: 'W', instructions: 'w' },
+      }));
+
+    const res = await request(app).post('/assignments/generate-steps').send({ topic: 'Plants', curriculum: 'CBSE' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.steps).toHaveLength(3);
+  });
+
+  test('a complete first reply is not retried', async () => {
+    mockGroqCreate.mockResolvedValue(groqJson({
+      brainstorm: { label: 'B', instructions: 'b' }, drawing: { label: 'D', instructions: 'd' }, structured_writing: { label: 'W', instructions: 'w' },
+    }));
+    await request(app).post('/assignments/generate-steps').send({ topic: 'Plants', curriculum: 'CBSE' });
+    expect(mockGroqCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('still-missing steps come back with the expected stepTypes so the app can fill them', async () => {
+    mockGroqCreate
+      .mockResolvedValueOnce(groqJson({ brainstorm: { label: 'B', instructions: 'b' } }))
+      .mockRejectedValueOnce(new Error('503'));
+
+    const res = await request(app).post('/assignments/generate-steps').send({ topic: 'Plants', curriculum: 'CBSE' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.steps.map(s => s.type)).toEqual(['brainstorm']);
+    expect(res.body.stepTypes).toEqual(['brainstorm', 'drawing', 'structured_writing']);
+  });
+});

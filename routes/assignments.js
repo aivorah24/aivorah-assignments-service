@@ -1679,24 +1679,38 @@ Return ONLY valid JSON with exactly these keys — use the EXACT type names show
   }
 }`;
 
-  try {
+  // gpt-oss-120b is a reasoning model: its reasoning counts against max_tokens,
+  // so a tight limit (it was 500) cut the JSON short and often only 1 of the
+  // 3 steps came back. A truncated or partial reply is asked for once more.
+  const requestSteps = async () => {
     const completion = await groq.chat.completions.create({
       model: 'openai/gpt-oss-120b',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.7,
-      max_tokens: 500,
+      max_tokens: 2000,
       response_format: { type: 'json_object' },
     });
-    const raw = completion.choices[0]?.message?.content || '{}';
-    const parsed = JSON.parse(raw);
+    try { return JSON.parse(completion.choices[0]?.message?.content || '{}'); } catch { return {}; }
+  };
+  const isComplete = (s) => Boolean(s?.label && s?.instructions);
+
+  try {
+    let parsed = await requestSteps();
+    if (!stepTypes.every(type => isComplete(parsed[type]))) {
+      const retry = await requestSteps().catch(() => ({}));
+      for (const type of stepTypes) {
+        if (!isComplete(parsed[type]) && isComplete(retry[type])) parsed = { ...parsed, [type]: retry[type] };
+      }
+    }
     const steps = [];
     for (const type of stepTypes) {
-      if (parsed[type]?.label && parsed[type]?.instructions) {
+      if (isComplete(parsed[type])) {
         steps.push({ type, label: parsed[type].label, instructions: parsed[type].instructions });
       }
     }
     if (steps.length === 0) return res.status(500).json({ error: 'AI returned invalid structure' });
-    res.json({ steps });
+    // stepTypes lets the client fill any step the AI still left out with its defaults.
+    res.json({ steps, stepTypes });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
