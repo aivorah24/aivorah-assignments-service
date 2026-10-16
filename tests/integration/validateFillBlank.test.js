@@ -49,4 +49,26 @@ describe('POST /assignments/validate-fill-blank', () => {
     const res = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'cta', correctAnswer: 'cat' });
     expect(res.body.correct).toBe(false);
   });
+
+  // Only a correct answer is accepted; anything else is pointed out as wrong.
+  test('a fragment of the correct answer is wrong ("a" for "Paris")', async () => {
+    const res = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'a', correctAnswer: 'Paris' });
+    expect(res.body.correct).toBe(false);
+  });
+
+  test('the correct comparison sign is accepted and a wrong one is rejected', async () => {
+    const ok = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '>', correctAnswer: '>' });
+    const wrong = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '<', correctAnswer: '>' });
+    const sentence = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '3/4 < 2/3', correctAnswer: '3/4 > 2/3' });
+    expect(ok.body.correct).toBe(true);
+    expect(wrong.body.correct).toBe(false);
+    expect(sentence.body.correct).toBe(false);
+  });
+
+  test('a wrong answer in another script is rejected, the right one accepted', async () => {
+    const wrong = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'हवा', correctAnswer: 'जल' });
+    const ok = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'जल।', correctAnswer: 'जल' });
+    expect(wrong.body.correct).toBe(false);
+    expect(ok.body.correct).toBe(true);
+  });
 });

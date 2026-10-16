@@ -191,6 +191,47 @@ describe('POST /assignments/:id/submit — fill_blank attempt-based scoring', ()
   });
 });
 
+describe('POST /assignments/:id/submit — fill_blank: only a correct answer counts', () => {
+  async function submitFill(q, answer) {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ quiz_questions: [q] }), error: null },
+      { data: baseAssignmentRow({ quiz_questions: [q] }), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockGroqCreate.mockResolvedValue(groqJson({ text: 'ok' }));
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID, quizAnswers: [{ answer: `[attempt:1] ${answer}` }],
+    });
+    return res.body.perQuestion[0];
+  }
+
+  test('part of the answer is not the answer', async () => {
+    const r = await submitFill(FILL_Q, 'a');
+    expect(r.correct).toBe(false);
+    expect(r.score).toBe(0);
+    expect(r.comment).toMatch(/correct answer is: Paris/);
+  });
+
+  test('a number inside a bigger number is wrong, and numbers get no typo allowance', async () => {
+    const q = { ...FILL_Q, question: '10 x 12 = ___', correct: '120' };
+    expect((await submitFill(q, '12')).correct).toBe(false);
+    expect((await submitFill(q, '1200')).correct).toBe(false);
+    expect((await submitFill(q, '120')).correct).toBe(true);
+  });
+
+  test('a small spelling slip in a word answer is still accepted', async () => {
+    expect((await submitFill(FILL_Q, 'Parris')).correct).toBe(true);
+  });
+
+  test('comparison signs and non-Latin answers are compared, not blanked out', async () => {
+    const sign = { ...FILL_Q, question: '3/4 ___ 2/3', correct: '>' };
+    expect((await submitFill(sign, '>')).correct).toBe(true);
+    expect((await submitFill(sign, '<')).correct).toBe(false);
+    const hindi = { ...FILL_Q, question: 'पानी = ___', correct: 'जल' };
+    expect((await submitFill(hindi, 'हवा')).correct).toBe(false);
+  });
+});
+
 describe('POST /assignments/:id/submit — quiz has no configured questions', () => {
   test('a real 400 when neither stored nor legacy nor submitted quiz questions exist', async () => {
     mockSb.setTable('assignments', { data: baseAssignmentRow({ quiz_questions: [], questions: [] }), error: null });

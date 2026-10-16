@@ -121,6 +121,45 @@ describe('POST /assignments/:id/submit — short-answer grading (B03 live path)'
     expect(res.body.perQuestion[0].correct).toBe(false);
   });
 
+  test('the grading prompt tells the AI to point out a wrong answer', async () => {
+    setup();
+    mockGroqCreate.mockResolvedValue(groqJson({ score: 0, comment: 'Not quite.' }));
+    await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID, quizAnswers: [{ answer: 'Airforce' }],
+    });
+    expect(mockGroqCreate.mock.calls[0][0].messages[0].content).toMatch(/Only a correct answer gets credit.*say so plainly and give the correct answer/);
+  });
+
+  test('a failed AI grade goes to teacher review, not a made-up 50%', async () => {
+    setup();
+    mockGroqCreate
+      .mockRejectedValueOnce(new Error('503'))
+      .mockResolvedValue(groqJson({ text: 'ok' }));
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID, quizAnswers: [{ answer: 'I till the soil' }],
+    });
+    const q = res.body.perQuestion[0];
+    expect(q.needsReview).toBe(true);
+    expect(q.score).toBeNull();
+    expect(q.correct).toBe(false);
+    expect(res.body.score).toBe(0);
+  });
+
+  test('a kind "not really" comment does not trip the gibberish filter', async () => {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ created_by_role: 'teacher', questions: [], task_steps: [{ type: 'tuning_in', label: 'Tune in' }] }), error: null },
+      { data: baseAssignmentRow(), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockGroqCreate
+      .mockResolvedValueOnce(groqJson({ answered: true, score: 60, studentAnswer: 'The student wrote that farmers grow food.', comment: "Good start, but that's not really all a farmer does.", teacherNote: '' }))
+      .mockResolvedValue(groqJson({ text: 'ok' }));
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID, stepAnswers: [{ type: 'tuning_in', tunedInText: 'Farmers grow food for us' }],
+    });
+    expect(res.body.perQuestion[0].score).toBe(60);
+  });
+
   test('score exactly at the threshold (70) is correct', async () => {
     setup();
     mockGroqCreate.mockResolvedValue(groqJson({ score: 70, comment: 'Good enough.' }));

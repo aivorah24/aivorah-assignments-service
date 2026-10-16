@@ -59,6 +59,10 @@ const cloudinary = require('cloudinary').v2;
 const crypto     = require('crypto');
 const { renderQuizHTML } = require('../utils/quizHtmlRenderer');
 const { resolveCorrectFromScore } = require('../utils/grading');
+const { normalizeAnswer } = require('../utils/answerCheck');
+
+// Written answers: a wrong answer is pointed out, never praised as correct.
+const WRONG_ANSWER_RULE = 'Only a correct answer gets credit. If it is wrong, the comment must say so plainly and give the correct answer.';
 const { normalizeCurriculum } = require('../utils/curriculum');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { publishJob } = require('../services/jobQueue');
@@ -342,7 +346,7 @@ function isGibberishAnswer(text) {
 // Detects when the AI's own description says the answer was gibberish/irrelevant.
 function gibberishDescribed(text) {
   if (!text || typeof text !== 'string') return false;
-  return /random (string|character|letter|word)|gibberish|nonsens|keyboard[- ]?mash|placeholder|meaningless|jumbl|not (a )?(real|actual|coherent|meaningful)|does not (make sense|relate|appear)|no (clear |discernible |real )?(meaning|relevance|word)|irrelevant (string|text|character|word)/i.test(text);
+  return /random (string|character|letter|word)|gibberish|nonsens|keyboard[- ]?mash|placeholder|meaningless|jumbl|not (a )?(real|actual|coherent|meaningful)\b|does not (make sense|relate|appear)|no (clear |discernible |real )?(meaning|relevance|word)|irrelevant (string|text|character|word)/i.test(text);
 }
 
 function stripOptionPrefix(value) {
@@ -2073,18 +2077,20 @@ router.post('/:id/submit', clearNotificationsOnSuccess, async (req, res) => {
               : `\nNo expected answer provided by teacher. Use your knowledge of ${assignment.subject || 'the subject'} to determine if the answer is correct. Be fair and accurate — do NOT hallucinate or guess answers.`;
             const comp = await groq.chat.completions.create({
               model: 'openai/gpt-oss-120b',
-              messages: [{ role: 'user', content: `You are an IB PYP ${assignment.grade || 'Grade 3'} ${assignment.subject || ''} teacher grading a student's answer.\nQuestion: "${qText}"${expectedBlock}\nStudent answer: "${studentAns}"\nGrade fairly for a young learner. Respond ONLY as JSON: {"score":0-100,"correct":bool,"comment":"one warm encouraging sentence"}` }],
+              messages: [{ role: 'user', content: `You are an IB PYP ${assignment.grade || 'Grade 3'} ${assignment.subject || ''} teacher grading a student's answer.\nQuestion: "${qText}"${expectedBlock}\nStudent answer: "${studentAns}"\nGrade fairly for a young learner. ${WRONG_ANSWER_RULE} Respond ONLY as JSON: {"score":0-100,"correct":bool,"comment":"one warm sentence"}` }],
               response_format: { type: 'json_object' },
             });
             const r = JSON.parse(comp.choices[0].message.content);
             const clampedScore = Math.max(0, Math.min(100, Number(r.score)||0));
-            return { number: i+1, question: qText, answered: true, score: clampedScore, correct: resolveCorrectFromScore(clampedScore), studentAnswer: studentAns, comment: r.comment || 'Good effort!' };
+            return { number: i+1, question: qText, answered: true, score: clampedScore, correct: resolveCorrectFromScore(clampedScore), studentAnswer: studentAns, comment: r.comment || (resolveCorrectFromScore(clampedScore) ? 'Well done!' : 'Not quite right.') };
           } catch {
-            return { number: i+1, question: qText, answered: true, score: 50, correct: false, studentAnswer: studentAns, comment: 'Good effort!' };
+            return { number: i+1, question: qText, answered: true, score: null, needsReview: true, correct: false, studentAnswer: studentAns, comment: 'Your teacher will check this answer.' };
           }
         }));
         perQuestion = graded;
-        score = graded.length > 0 ? Math.round(graded.reduce((s, q) => s + q.score, 0) / graded.length) : 50;
+        // needsReview answers were never scored, so they stay out of the average.
+        const scorable = graded.filter(q => !q.needsReview);
+        score = scorable.length > 0 ? Math.round(scorable.reduce((s, q) => s + q.score, 0) / scorable.length) : 0;
         try {
           const summaryComp = await groq.chat.completions.create({
             model: 'openai/gpt-oss-120b',
@@ -2142,12 +2148,15 @@ router.post('/:id/submit', clearNotificationsOnSuccess, async (req, res) => {
           const attemptMatch = studentAns.match(/^\[attempt:(\d+)\]\s*/i);
           const attemptNum = attemptMatch ? parseInt(attemptMatch[1]) : 1;
           const cleanAns = studentAns.replace(/^\[revealed\]\s*/i, '').replace(/^\[attempt:\d+\]\s*/i, '');
-          // Fuzzy match
-          const normalize = s => s.toLowerCase().trim().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
-          const sNorm = normalize(cleanAns);
-          const cNorm = normalize(q.correct);
-          let isCorrect = sNorm === cNorm || sNorm.includes(cNorm) || cNorm.includes(sNorm);
-          if (!isCorrect) {
+          // Only a correct answer counts. The old substring check accepted wrong
+          // answers ("a" inside "Paris", "12" inside "120"), and its a-z-only
+          // normalising turned ">", "<", Hindi or Telugu into "" (always equal).
+          // A small spelling slip is forgiven in word answers only, never in
+          // numbers or signs.
+          const sNorm = normalizeAnswer(cleanAns);
+          const cNorm = normalizeAnswer(q.correct);
+          let isCorrect = !!sNorm && sNorm === cNorm;
+          if (!isCorrect && sNorm && cNorm.length >= 4 && /^\p{L}+$/u.test(cNorm)) {
             const a = sNorm, b = cNorm;
             const m = a.length, n = b.length;
             const dp = Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i===0?j:j===0?i:0));
@@ -2235,10 +2244,11 @@ Question: "${q.question}"
 Expected answer / key points: "${q.correct}"
 Student's answer: "${studentAns}"
 
-Is the student's answer correct or mostly correct?
+Is the student's answer correct?
 - Full credit (score 100): covers the key points accurately
 - Partial credit (score 50): partially correct, missing some key points
 - No credit (score 0): incorrect or completely off-topic
+${WRONG_ANSWER_RULE}
 
 Respond ONLY as JSON: {"score":0-100,"correct":bool,"comment":"one warm, specific sentence for an 8-year-old","explanation":"${q.explanation || ''}"}`;
 
@@ -2260,9 +2270,9 @@ Respond ONLY as JSON: {"score":0-100,"correct":bool,"comment":"one warm, specifi
             };
           } catch {
             return { number: i+1, question: q.question, type: 'short_answer',
-              answered: true, score: 50, correct: false,
+              answered: true, score: null, needsReview: true, correct: false,
               studentAnswer: studentAns, correctAnswer: q.correct,
-              comment: 'Good attempt!', explanation: q.explanation || '' };
+              comment: 'Your teacher will check this answer.', explanation: q.explanation || '' };
           }
         }
       }));
@@ -2607,20 +2617,22 @@ Respond ONLY as JSON: {"text":"...student-facing...","teacherSummary":"...teache
             : `\nNo expected answer provided by teacher. Use your knowledge of ${assignment.subject || 'the subject'} to determine if the answer is correct. Be fair and accurate.`;
           const comp = await groq.chat.completions.create({
             model: 'openai/gpt-oss-120b',
-            messages: [{ role: 'user', content: `You are an IB PYP ${assignment.grade || 'Grade 3'} ${assignment.subject || ''} teacher grading a student's answer.\nQuestion: "${qText}"${expectedBlock}\nStudent answer: "${studentAns}"\nGrade fairly for a young learner. Respond ONLY as JSON: {"score":0-100,"correct":true/false,"comment":"one warm encouraging sentence"}` }],
+            messages: [{ role: 'user', content: `You are an IB PYP ${assignment.grade || 'Grade 3'} ${assignment.subject || ''} teacher grading a student's answer.\nQuestion: "${qText}"${expectedBlock}\nStudent answer: "${studentAns}"\nGrade fairly for a young learner. ${WRONG_ANSWER_RULE} Respond ONLY as JSON: {"score":0-100,"correct":true/false,"comment":"one warm sentence"}` }],
             response_format: { type: 'json_object' },
           });
           const r = JSON.parse(comp.choices[0].message.content);
           const clampedScore = Math.max(0, Math.min(100, Number(r.score)||0));
-          return { number: i+1, question: qText, answered: true, score: clampedScore, correct: resolveCorrectFromScore(clampedScore), studentAnswer: studentAns, comment: r.comment || 'Good effort!' };
+          return { number: i+1, question: qText, answered: true, score: clampedScore, correct: resolveCorrectFromScore(clampedScore), studentAnswer: studentAns, comment: r.comment || (resolveCorrectFromScore(clampedScore) ? 'Well done!' : 'Not quite right.') };
         } catch (e) {
           console.error(`Text answer grading error Q${i+1}:`, e.message);
-          return { number: i+1, question: qText, answered: true, score: 50, correct: false, studentAnswer: studentAns, comment: 'Good effort!' };
+          return { number: i+1, question: qText, answered: true, score: null, needsReview: true, correct: false, studentAnswer: studentAns, comment: 'Your teacher will check this answer.' };
         }
       }));
       perQuestion = graded;
       const answeredGraded = graded.filter(q => q.answered);
-      score = answeredGraded.length > 0 ? Math.round(answeredGraded.reduce((s, q) => s + q.score, 0) / graded.length) : 0;
+      // A blank answer counts as 0; a needsReview one was never scored, so it stays out.
+      const scorable = graded.filter(q => !q.needsReview);
+      score = answeredGraded.length > 0 && scorable.length > 0 ? Math.round(scorable.reduce((s, q) => s + q.score, 0) / scorable.length) : 0;
       try {
         const summaryComp = await groq.chat.completions.create({
           model: 'openai/gpt-oss-120b',
@@ -2777,7 +2789,8 @@ Respond ONLY as valid JSON:
             number: i + 1,
             question: `Page ${i + 1}`,
             answered: true,
-            score: 50,
+            score: null,
+            needsReview: true,
             studentAnswer: null,
             correct: false,
             comment: 'Could not read this page clearly â€” please ask your teacher to review.',
@@ -2787,15 +2800,15 @@ Respond ONLY as valid JSON:
 
       perQuestion = await Promise.all(gradingPromises);
 
-      // Compute real overall score
-      const totalScore = perQuestion.reduce((s, q) => s + q.score, 0);
-      score = Math.round(totalScore / perQuestion.length);
+      // Compute real overall score (pages that need teacher review were never scored)
+      const scoredPages = perQuestion.filter(q => !q.needsReview);
+      score = scoredPages.length > 0 ? Math.round(scoredPages.reduce((s, q) => s + q.score, 0) / scoredPages.length) : 0;
 
       // Generate overall summary via LLM
       const answeredCount  = perQuestion.filter(q => q.answered).length;
       const correctCount   = perQuestion.filter(q => q.correct).length;
       const summaryPrompt  = `A student completed ${answeredCount} out of ${questionImages.length} pages of their assignment.
-Pages scoring 70%+: ${correctCount}. Scores per page: ${perQuestion.map(q => `Page${q.number}=${q.score}%`).join(', ')}.
+Pages scoring 70%+: ${correctCount}. Scores per page: ${perQuestion.map(q => `Page${q.number}=${q.needsReview ? 'teacher review' : `${q.score}%`}`).join(', ')}.
 Overall score: ${score}%.
 Assignment: ${assignment.title}, Subject: ${assignment.subject}${assignment.grade ? ', Grade: ' + assignment.grade : ''}.
 
@@ -3109,9 +3122,19 @@ router.post('/validate-fill-blank', async (req, res) => {
   const { studentAnswer, correctAnswer } = req.body;
   if (!studentAnswer || !correctAnswer) return res.status(400).json({ error: 'studentAnswer and correctAnswer required' });
 
+  // Comparison signs ("3/4 > 2/3") and non-Latin answers would be blanked out by
+  // the a-z normaliser below (">" and "<" both became ""), so they are compared
+  // exactly with the shared normaliser that keeps them.
+  const both = `${studentAnswer} ${correctAnswer}`;
+  if (/[<>=≤≥≠]|&[lg]t;/.test(both) || /[^\x00-\x7F]/.test(both)) {
+    const s = normalizeAnswer(studentAnswer);
+    return res.json({ correct: !!s && s === normalizeAnswer(correctAnswer) });
+  }
+
   const normalize = s => s.toLowerCase().trim().replace(/[^a-z0-9./\s]/g, '').replace(/\s+/g, ' ');
   const sNorm = normalize(String(studentAnswer));
   const cNorm = normalize(String(correctAnswer));
+  if (!sNorm) return res.json({ correct: false });
 
   // Exact match after normalization
   if (sNorm === cNorm) return res.json({ correct: true });
@@ -3133,8 +3156,12 @@ router.post('/validate-fill-blank', async (req, res) => {
     return res.json({ correct: false });
   }
 
-  // Text-only answers: contains match (e.g. "new delhi" for "New Delhi, India")
-  if (sNorm.includes(cNorm) || cNorm.includes(sNorm)) return res.json({ correct: true });
+  // Text-only answers: the whole correct answer written inside a longer one, or
+  // most of it in whole words ("new delhi" for "New Delhi, India"). A fragment
+  // like "a" for "Paris" is wrong.
+  const wholeWords = (inner, outer) => ` ${outer} `.includes(` ${inner} `);
+  if (wholeWords(cNorm, sNorm)) return res.json({ correct: true });
+  if (wholeWords(sNorm, cNorm) && sNorm.length * 2 >= cNorm.length) return res.json({ correct: true });
 
   // Levenshtein for text-only, longer answers (tolerance: 1 char per 5 chars, min 5 chars)
   if (cNorm.length >= 5) {
