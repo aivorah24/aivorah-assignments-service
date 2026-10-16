@@ -1,4 +1,13 @@
 jest.mock('../../services/supabase', () => ({ from: jest.fn() }));
+// The AI meaning check (word answers only). Default: it says "incorrect".
+const mockGroq = jest.fn();
+jest.mock('groq-sdk', () => jest.fn().mockImplementation(() => ({ chat: { completions: { create: (...a) => mockGroq(...a) } } })));
+const mockGemini = jest.fn();
+jest.mock('@google/generative-ai', () => ({
+  GoogleGenerativeAI: jest.fn().mockImplementation(() => ({ getGenerativeModel: () => ({ generateContent: (...a) => mockGemini(...a) }) })),
+}));
+const aiSays = verdict => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ verdict, reason: '' }) } }] });
+beforeEach(() => { mockGroq.mockReset().mockResolvedValue(aiSays('incorrect')); mockGemini.mockReset(); });
 
 const request = require('supertest');
 const app = require('../../index');
@@ -77,5 +86,34 @@ describe('POST /assignments/validate-fill-blank', () => {
     const thou = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '4,000', correctAnswer: '4000' });
     expect(neg.body.correct).toBe(false);
     expect(thou.body.correct).toBe(true);
+  });
+
+  test('a right word in other words is accepted by the AI meaning check ("Gandhiji")', async () => {
+    mockGroq.mockResolvedValue(aiSays('correct'));
+    const res = await request(app).post('/assignments/validate-fill-blank')
+      .send({ studentAnswer: 'Gandhiji', correctAnswer: 'Mahatma Gandhi', question: 'The Father of the Nation is ___.' });
+    expect(res.body.correct).toBe(true);
+    expect(mockGroq.mock.calls[0][0].messages[0].content).toContain('Question: The Father of the Nation is ___.');
+  });
+
+  test('"partly right" is still wrong for a blank', async () => {
+    mockGroq.mockResolvedValue(aiSays('partial'));
+    const res = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'Gandhi', correctAnswer: 'Mahatma Gandhi' });
+    expect(res.body.correct).toBe(false);
+  });
+
+  test('numbers, signs and exact matches never go to the AI', async () => {
+    await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '5', correctAnswer: '4' });
+    await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: '<', correctAnswer: '>' });
+    await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'paris', correctAnswer: 'Paris' });
+    expect(mockGroq).not.toHaveBeenCalled();
+  });
+
+  test('AI down (Groq and Gemini): the exact check stands, the request does not fail', async () => {
+    mockGroq.mockRejectedValue(new Error('429'));
+    mockGemini.mockRejectedValue(new Error('503'));
+    const res = await request(app).post('/assignments/validate-fill-blank').send({ studentAnswer: 'Gandhiji', correctAnswer: 'Mahatma Gandhi' });
+    expect(res.status).toBe(200);
+    expect(res.body.correct).toBe(false);
   });
 });

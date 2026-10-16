@@ -65,7 +65,7 @@ router.get('/providers', async (req, res) => {
 // Deterministic checks first: an answer in the wrong writing system (Tamil on
 // a Telugu worksheet) is never "correct", whatever the model says.
 router.post('/grade-answer', express.json({ limit: '64kb' }), async (req, res) => {
-  const { dominantScript, requiredScript, isWrongScript, matchesAnyAnswer } = require('../utils/answerCheck');
+  const { requiredScript, isWrongScript, matchesAnyAnswer } = require('../utils/answerCheck');
   const { expected = '', student = '', question = '', acceptableAnswers = [], worksheetScript = '' } = req.body || {};
   const studentText = String(student).slice(0, 2000);
   if (!studentText.trim()) return res.status(400).json({ error: 'student answer required' });
@@ -76,32 +76,8 @@ router.post('/grade-answer', express.json({ limit: '64kb' }), async (req, res) =
   if (matchesAnyAnswer(studentText, keys)) return res.json({ verdict: 'correct', reason: '' });
   if (!String(expected).trim()) return res.json({ verdict: 'incorrect', reason: '' }); // nothing to judge against
   try {
-    const { callGroqWithText } = require('../services/quizVision');
-    const prompt = `You grade a primary-school student's answer. Judge MEANING, not spelling of minor words.
-Rules:
-- "correct": same meaning as the expected answer (a paraphrase or a shorter form that still answers the question is fine).
-- "partial": partly right (one of two required parts, or the right idea with a factual slip).
-- "incorrect": wrong, off-topic, empty of meaning, or in a different language than the expected answer. Expected answer language/script: ${dominantScript(expected) || 'any'}.
-Return JSON: {"verdict":"correct|partial|incorrect","reason":"one short, kind sentence for the student, in the language of the expected answer"}.
-
-Question: ${String(question).slice(0, 600)}
-Expected answer: ${String(expected).slice(0, 1000)}
-${keys.length > 1 ? `Also acceptable: ${keys.slice(1).join(' / ').slice(0, 600)}\n` : ''}Student answer: ${studentText}`;
-    let raw;
-    try {
-      raw = await callGroqWithText(prompt, { maxTokens: 800 });
-    } catch (groqErr) {
-      // Groq down or rate-limited: a right answer must not turn "wrong" because
-      // of it, so Gemini judges instead.
-      if (!process.env.GEMINI_API_KEY) throw groqErr;
-      console.warn('[quiz/grade-answer] Groq failed, using Gemini:', groqErr.message);
-      const { geminiModel } = require('../services/quizVision');
-      const result = await geminiModel({ responseMimeType: 'application/json', temperature: 0 }).generateContent([{ text: prompt }]);
-      raw = result.response.text();
-    }
-    const parsed = JSON.parse(String(raw).match(/\{[\s\S]*\}/)?.[0] || raw);
-    const verdict = ['correct', 'partial', 'incorrect'].includes(parsed.verdict) ? parsed.verdict : 'incorrect';
-    res.json({ verdict, reason: String(parsed.reason || '').slice(0, 300) });
+    const { gradeAnswerMeaning } = require('../services/answerGrader');
+    res.json(await gradeAnswerMeaning({ expected, student: studentText, question, acceptableAnswers: keys.slice(1) }));
   } catch (err) {
     console.warn('[quiz/grade-answer] grading failed:', err.message);
     res.status(503).json({ verdict: 'incorrect', reason: '', error: 'grading unavailable' });

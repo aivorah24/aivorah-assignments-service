@@ -223,6 +223,37 @@ describe('POST /assignments/:id/submit — fill_blank: only a correct answer cou
     expect((await submitFill(FILL_Q, 'Parris')).correct).toBe(true);
   });
 
+  test('the saved score agrees with the live AI check for a right word in other words', async () => {
+    const q = { ...FILL_Q, question: 'The Father of the Nation is ___.', correct: 'Mahatma Gandhi' };
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ quiz_questions: [q] }), error: null },
+      { data: baseAssignmentRow({ quiz_questions: [q] }), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockGroqCreate
+      .mockResolvedValueOnce(groqJson({ verdict: 'correct', reason: '' }))
+      .mockResolvedValue(groqJson({ text: 'ok' }));
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID, quizAnswers: [{ answer: '[attempt:1] Gandhiji' }],
+    });
+    expect(res.body.perQuestion[0].correct).toBe(true);
+    expect(res.body.perQuestion[0].score).toBe(100);
+  });
+
+  test('a revealed answer is never re-judged by the AI', async () => {
+    mockSb.setTable('assignments', [
+      { data: baseAssignmentRow({ quiz_questions: [FILL_Q] }), error: null },
+      { data: baseAssignmentRow({ quiz_questions: [FILL_Q] }), error: null },
+    ]);
+    mockSb.setTable('assignment_submissions', { data: {}, error: null });
+    mockGroqCreate.mockResolvedValue(groqJson({ text: 'ok' }));
+    const res = await request(app).post('/assignments/a1/submit').send({
+      studentId: STUDENT_UUID, quizAnswers: [{ answer: '[revealed] Paris' }],
+    });
+    expect(res.body.perQuestion[0].correct).toBe(false);
+    expect(mockGroqCreate.mock.calls.every(([c]) => !String(c.messages[0].content).includes('Judge MEANING'))).toBe(true);
+  });
+
   test('comparison signs and non-Latin answers are compared, not blanked out', async () => {
     const sign = { ...FILL_Q, question: '3/4 ___ 2/3', correct: '>' };
     expect((await submitFill(sign, '>')).correct).toBe(true);

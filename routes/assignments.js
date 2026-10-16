@@ -59,7 +59,8 @@ const cloudinary = require('cloudinary').v2;
 const crypto     = require('crypto');
 const { renderQuizHTML } = require('../utils/quizHtmlRenderer');
 const { resolveCorrectFromScore } = require('../utils/grading');
-const { normalizeAnswer } = require('../utils/answerCheck');
+const { normalizeAnswer, isWrongScript } = require('../utils/answerCheck');
+const { gradeAnswerMeaning, isWordAnswer } = require('../services/answerGrader');
 
 // Written answers: a wrong answer is pointed out, never praised as correct.
 const WRONG_ANSWER_RULE = 'Only a correct answer gets credit. If it is wrong, the comment must say so plainly and give the correct answer.';
@@ -2148,21 +2149,9 @@ router.post('/:id/submit', clearNotificationsOnSuccess, async (req, res) => {
           const attemptMatch = studentAns.match(/^\[attempt:(\d+)\]\s*/i);
           const attemptNum = attemptMatch ? parseInt(attemptMatch[1]) : 1;
           const cleanAns = studentAns.replace(/^\[revealed\]\s*/i, '').replace(/^\[attempt:\d+\]\s*/i, '');
-          // Only a correct answer counts. The old substring check accepted wrong
-          // answers ("a" inside "Paris", "12" inside "120"), and its a-z-only
-          // normalising turned ">", "<", Hindi or Telugu into "" (always equal).
-          // A small spelling slip is forgiven in word answers only, never in
-          // numbers or signs.
-          const sNorm = normalizeAnswer(cleanAns);
-          const cNorm = normalizeAnswer(q.correct);
-          let isCorrect = !!sNorm && sNorm === cNorm;
-          if (!isCorrect && sNorm && cNorm.length >= 4 && /^\p{L}+$/u.test(cNorm)) {
-            const a = sNorm, b = cNorm;
-            const m = a.length, n = b.length;
-            const dp = Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i===0?j:j===0?i:0));
-            for(let ii=1;ii<=m;ii++)for(let jj=1;jj<=n;jj++) dp[ii][jj]=a[ii-1]===b[jj-1]?dp[ii-1][jj-1]:1+Math.min(dp[ii-1][jj],dp[ii][jj-1],dp[ii-1][jj-1]);
-            isCorrect = dp[m][n] <= Math.floor(Math.max(m,n)/4);
-          }
+          // Same check as the live validate-fill-blank, so the saved score
+          // matches what the student was shown (a revealed answer is never re-judged).
+          const isCorrect = !wasRevealed && (await checkFillBlank(cleanAns, String(q.correct || ''), q.question)).correct;
           // Scoring: attempt 1 = 100, attempt 2 = 60, attempt 3+ or revealed = 0
           const score = wasRevealed ? 0 : !isCorrect ? 0 : attemptNum === 1 ? 100 : 60;
           const comment = wasRevealed
@@ -3116,29 +3105,28 @@ Respond ONLY as JSON: {"steps":["Step 1: ...","Step 2: ...","Step 3: ..."],"corr
   }
 });
 
-// ── POST /assignments/validate-fill-blank ──
-// Validates a student's fill-in-the-blank answer with fuzzy tolerance
-router.post('/validate-fill-blank', async (req, res) => {
-  const { studentAnswer, correctAnswer } = req.body;
-  if (!studentAnswer || !correctAnswer) return res.status(400).json({ error: 'studentAnswer and correctAnswer required' });
-
+// Exact check for a fill-in-the-blank answer, with the tolerance a teacher
+// would give (case, spacing, a bare number for "4 novels", 0.5 for 1/2, one
+// typo in a longer word). Used by validate-fill-blank AND submit so the live
+// check and the saved score agree.
+function fillBlankMatches(studentAnswer, correctAnswer) {
   // Comparison signs ("3/4 > 2/3") and non-Latin answers would be blanked out by
   // the a-z normaliser below (">" and "<" both became ""), so they are compared
   // exactly with the shared normaliser that keeps them.
   const both = `${studentAnswer} ${correctAnswer}`;
   if (/[<>=≤≥≠]|&[lg]t;/.test(both) || /[^\x00-\x7F]/.test(both)) {
     const s = normalizeAnswer(studentAnswer);
-    return res.json({ correct: !!s && s === normalizeAnswer(correctAnswer) });
+    return !!s && s === normalizeAnswer(correctAnswer);
   }
 
   // "-3" is not "3", and "4,000" is "4000".
   const normalize = s => s.toLowerCase().trim().replace(/(\d),(?=\d{3}(\D|$))/g, '$1').replace(/[^a-z0-9./\s-]/g, '').replace(/\s+/g, ' ');
   const sNorm = normalize(String(studentAnswer));
   const cNorm = normalize(String(correctAnswer));
-  if (!sNorm) return res.json({ correct: false });
+  if (!sNorm) return false;
 
   // Exact match after normalization
-  if (sNorm === cNorm) return res.json({ correct: true });
+  if (sNorm === cNorm) return true;
 
   // Extract leading number/fraction from both (e.g. "4 novels" → "4", "1/2" → "1/2")
   const extractNum = s => (s.match(/^-?[\d./]+/) || [''])[0];
@@ -3148,21 +3136,21 @@ router.post('/validate-fill-blank', async (req, res) => {
   // If the correct answer contains a number, compare numbers strictly — no fuzzy
   if (cNum) {
     // Allow student to write just the number ("4") when correct is "4 novels"
-    if (sNum === cNum) return res.json({ correct: true });
+    if (sNum === cNum) return true;
     // Decimal equivalence: "0.5" == "1/2" etc.
     const toDecimal = s => { const parts = s.split('/'); return parts.length === 2 ? parseFloat(parts[0]) / parseFloat(parts[1]) : parseFloat(s); };
     const sVal = toDecimal(sNum), cVal = toDecimal(cNum);
-    if (!isNaN(sVal) && !isNaN(cVal) && Math.abs(sVal - cVal) < 0.001) return res.json({ correct: true });
+    if (!isNaN(sVal) && !isNaN(cVal) && Math.abs(sVal - cVal) < 0.001) return true;
     // Numbers differ → wrong (skip fuzzy for numeric answers)
-    return res.json({ correct: false });
+    return false;
   }
 
   // Text-only answers: the whole correct answer written inside a longer one, or
   // most of it in whole words ("new delhi" for "New Delhi, India"). A fragment
   // like "a" for "Paris" is wrong.
   const wholeWords = (inner, outer) => ` ${outer} `.includes(` ${inner} `);
-  if (wholeWords(cNorm, sNorm)) return res.json({ correct: true });
-  if (wholeWords(sNorm, cNorm) && sNorm.length * 2 >= cNorm.length) return res.json({ correct: true });
+  if (wholeWords(cNorm, sNorm)) return true;
+  if (wholeWords(sNorm, cNorm) && sNorm.length * 2 >= cNorm.length) return true;
 
   // Levenshtein for text-only, longer answers (tolerance: 1 char per 5 chars, min 5 chars)
   if (cNorm.length >= 5) {
@@ -3175,11 +3163,34 @@ router.post('/validate-fill-blank', async (req, res) => {
     }
     const maxLen = Math.max(sNorm.length, cNorm.length);
     const tolerance = Math.floor(maxLen / 5);
-    if (levenshtein(sNorm, cNorm) <= tolerance) return res.json({ correct: true });
+    if (levenshtein(sNorm, cNorm) <= tolerance) return true;
   }
 
-  return res.json({ correct: false });
+  return false;
+}
+
+// ── POST /assignments/validate-fill-blank ──
+// The app quiz's live fill-in-the-blank check. A word answer the exact check
+// rejects is judged by meaning ("Gandhiji" for "Mahatma Gandhi"); numbers and
+// signs stay exact. If the AI is down, the exact check's answer stands.
+router.post('/validate-fill-blank', async (req, res) => {
+  const { studentAnswer, correctAnswer, question = '' } = req.body;
+  if (!studentAnswer || !correctAnswer) return res.status(400).json({ error: 'studentAnswer and correctAnswer required' });
+  res.json(await checkFillBlank(String(studentAnswer), String(correctAnswer), question));
 });
+
+// { correct, reason? } — the exact check, then the AI meaning check for words.
+async function checkFillBlank(studentAnswer, correctAnswer, question = '') {
+  if (fillBlankMatches(studentAnswer, correctAnswer)) return { correct: true };
+  if (!isWordAnswer(correctAnswer) || isWrongScript(studentAnswer, correctAnswer, '')) return { correct: false };
+  try {
+    const { verdict, reason } = await gradeAnswerMeaning({ expected: correctAnswer, student: studentAnswer, question });
+    return { correct: verdict === 'correct', reason };
+  } catch (e) {
+    console.warn('[fill-blank] meaning check unavailable:', e.message);
+    return { correct: false };
+  }
+}
 
 // Test-only exports — the router is still the default export used by
 // index.js/production; these attach the internal pure functions so unit
