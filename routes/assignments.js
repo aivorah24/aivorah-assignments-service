@@ -81,6 +81,7 @@ const { client: qdrantClient } = require('../services/qdrant');
 const { embed } = require('../services/embeddings');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const { callVisionGrader } = require('../services/visionGrader');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
 cloudinary.config({
@@ -505,16 +506,21 @@ async function uploadSubmissionEvidence({ imageB64, imageMimeVal, id, studentId,
 // score stays null so it can never be mistaken for a real AI-assigned score.
 async function gradeVisionSubmission({ contentParts, gibberishCheckText }) {
   try {
-    const model = contentParts.some(p => p.type === 'image_url')
-      ? 'meta-llama/llama-4-maverick-17b-128e-instruct'
-      : 'openai/gpt-oss-120b';
-    const completion = await groq.chat.completions.create({
-      model,
-      messages: [{ role: 'user', content: contentParts.length === 1 ? contentParts[0].text : contentParts }],
-      ...(model === 'openai/gpt-oss-120b' ? { response_format: { type: 'json_object' } } : {}),
-    });
-    const raw = completion.choices[0].message.content.replace(/```json[\s\S]*?```|```/g, '').trim();
-    const result = JSON.parse(raw);
+    const imageUrls = contentParts.filter(p => p.type === 'image_url').map(p => p.image_url.url);
+    let raw;
+    if (imageUrls.length) {
+      const prompt = contentParts.filter(p => p.type === 'text').map(p => p.text).join('\n');
+      raw = await callVisionGrader(prompt, imageUrls);
+    } else {
+      const completion = await groq.chat.completions.create({
+        model: 'openai/gpt-oss-120b',
+        messages: [{ role: 'user', content: contentParts.map(p => p.text).join('\n') }],
+        response_format: { type: 'json_object' },
+      });
+      raw = completion.choices[0].message.content;
+    }
+    raw = String(raw || '').replace(/```(?:json)?/g, '').trim();
+    const result = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
     let score = Math.max(0, Math.min(100, Number(result.score) || 0));
     // Safety net: if the actual answer is gibberish/random characters, force
     // a hard 0 - a teacher gives no marks for keyboard-mashing, even if the
@@ -2739,12 +2745,8 @@ Respond ONLY as valid JSON:
         contentParts.push({ type: 'image_url', image_url: { url: `data:${img.imageMime || 'image/jpeg'};base64,${img.imageBase64}` } });
 
         try {
-          const completion = await groq.chat.completions.create({
-            model: 'meta-llama/llama-4-maverick-17b-128e-instruct',
-            messages: [{ role: 'user', content: contentParts }],
-          });
-          const raw = completion.choices[0].message.content.replace(/```json[\s\S]*?```|```/g, '').trim();
-          const result = JSON.parse(raw);
+          const raw = String(await callVisionGrader(prompt, contentParts.slice(1).map(p => p.image_url.url))).replace(/```(?:json)?/g, '').trim();
+          const result = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
           const clampedScore = Math.max(0, Math.min(100, Number(result.score) || 0));
           return {
             number: i + 1,
@@ -2833,20 +2835,11 @@ Respond ONLY as JSON:
 }`;
 
       const completion = await Promise.race([
-        groq.chat.completions.create({
-          model: 'meta-llama/llama-4-maverick-17b-128e-instruct',
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
-              { type: 'image_url', image_url: { url: `data:${imageMime};base64,${imageBase64}` } },
-            ],
-          }],
-        }),
+        callVisionGrader(prompt, [`data:${imageMime};base64,${imageBase64}`]),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Grading timeout')), 55_000)),
       ]);
-      const raw  = completion.choices[0].message.content.replace(/```json[\s\S]*?```|```/g, '').trim();
-      const result = JSON.parse(raw);
+      const raw  = String(completion).replace(/```(?:json)?/g, '').trim();
+      const result = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
       perQuestion = Array.isArray(result.perQuestion) ? result.perQuestion : [];
       if (perQuestion.length > 0) {
         score = Math.round(perQuestion.reduce((s, q) => s + (Number(q.score) || 0), 0) / perQuestion.length);
