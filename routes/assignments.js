@@ -528,16 +528,67 @@ function drawingRubric(gradeLabel) {
 - Be specific about what you actually see drawn — do NOT invent elements that are not there`;
 }
 
-// Groq has no vision model on this account (llama-4 maverick/scout 404), so images go to Gemini.
+const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
+
+// Groq caps base64 images at 4MB; phone photos often exceed that.
+async function shrinkForGroq({ buffer, mime }) {
+  if (buffer.length <= 2.5 * 1024 * 1024) return { buffer, mime };
+  const { Jimp } = require('jimp');
+  const img = await Jimp.read(buffer);
+  if (img.bitmap.width > 1600) img.resize({ w: 1600 });
+  return { buffer: await img.getBuffer('image/jpeg', { quality: 80 }), mime: 'image/jpeg' };
+}
+
+async function callGroqVision(buffers, prompt) {
+  const images = await Promise.all(buffers.map(shrinkForGroq));
+  const completion = await groq.chat.completions.create({
+    model: GROQ_VISION_MODEL,
+    temperature: 0,
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: prompt },
+      ...images.map(i => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.buffer.toString('base64')}` } })),
+    ] }],
+  });
+  return completion.choices[0].message.content.replace(/<think>[\s\S]*?<\/think>/g, '');
+}
+
+// Llama-4 vision models are gone from Groq (404); Gemini/HF credits can run out.
+// Chain: Gemini -> Groq Qwen -> Mistral -> HF Qwen (student's image only).
+async function gradeImagesWithFallback(contentParts) {
+  const prompt = contentParts.filter(p => p.type === 'text').map(p => p.text).join('\n\n');
+  const images = (await Promise.all(contentParts.filter(p => p.type === 'image_url').map(p => toGeminiImagePart(p.image_url.url)))).filter(Boolean);
+  if (!images.length) throw new Error('no readable image');
+  const errors = [];
+  if (genAI) {
+    try {
+      const { geminiModel } = require('../services/quizVision');
+      const result = await geminiModel({ responseMimeType: 'application/json', temperature: 0 }).generateContent([{ text: prompt }, ...images]);
+      return result.response.text();
+    } catch (e) { errors.push(`gemini: ${e.message}`); }
+  }
+  const buffers = images.map(i => ({ buffer: Buffer.from(i.inlineData.data, 'base64'), mime: i.inlineData.mimeType }));
+  if (process.env.GROQ_API_KEY) {
+    try { return await callGroqVision(buffers, prompt); } catch (e) { errors.push(`groq: ${e.message}`); }
+  }
+  if (process.env.MISTRAL_API_KEY) {
+    try {
+      const { callMistralVision } = require('../services/worksheet/providers');
+      return await callMistralVision(buffers, prompt);
+    } catch (e) { errors.push(`mistral: ${e.message}`); }
+  }
+  try {
+    const { callQwenVisionRaw } = require('../services/quizVision');
+    const last = buffers[buffers.length - 1];
+    return await callQwenVisionRaw(last.buffer, last.mime, prompt);
+  } catch (e) { errors.push(`qwen: ${e.message}`); }
+  throw new Error(`all vision providers failed - ${errors.join(' | ').slice(0, 500)}`);
+}
+
 async function gradeVisionSubmission({ contentParts, gibberishCheckText }) {
   try {
     let raw;
     if (contentParts.some(p => p.type === 'image_url')) {
-      if (!genAI) throw new Error('GEMINI_API_KEY not configured');
-      const { geminiModel } = require('../services/quizVision');
-      const parts = await Promise.all(contentParts.map(p => p.type === 'text' ? { text: p.text } : toGeminiImagePart(p.image_url.url)));
-      const result = await geminiModel({ responseMimeType: 'application/json', temperature: 0 }).generateContent(parts.filter(Boolean));
-      raw = result.response.text();
+      raw = await gradeImagesWithFallback(contentParts);
     } else {
       const completion = await groq.chat.completions.create({
         model: 'openai/gpt-oss-120b',
@@ -547,7 +598,7 @@ async function gradeVisionSubmission({ contentParts, gibberishCheckText }) {
       raw = completion.choices[0].message.content;
     }
     raw = raw.replace(/```json|```/g, '').trim();
-    const result = JSON.parse(raw);
+    const result = JSON.parse((raw.match(/\{[\s\S]*\}/) || [raw])[0]);
     let score = Math.max(0, Math.min(100, Number(result.score) || 0));
     // Safety net: if the actual answer is gibberish/random characters, force
     // a hard 0 - a teacher gives no marks for keyboard-mashing, even if the

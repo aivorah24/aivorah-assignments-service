@@ -36,6 +36,12 @@ jest.mock('@google/generative-ai', () => ({
   })),
 }));
 
+const mockMistralVision = jest.fn();
+jest.mock('../../services/worksheet/providers', () => ({
+  ...jest.requireActual('../../services/worksheet/providers'),
+  callMistralVision: (...args) => mockMistralVision(...args),
+}));
+
 const mockCloudinaryUpload = jest.fn();
 jest.mock('cloudinary', () => ({
   v2: { config: jest.fn(), uploader: { upload: (...args) => mockCloudinaryUpload(...args) } },
@@ -63,6 +69,7 @@ beforeEach(() => {
   mockSb.reset();
   mockGroqCreate.mockReset();
   mockGeminiGenerate.mockClear();
+  mockMistralVision.mockReset();
   mockCloudinaryUpload.mockReset();
 });
 
@@ -224,4 +231,57 @@ describe('drawing grading uses Gemini vision with the real grade', () => {
     expect(res.body.perQuestion[0]).toMatchObject({ answered: true, score: 90 });
     expect(mockGeminiGenerate).toHaveBeenCalled();
   });
+});
+
+test('Gemini and Groq vision both fail -> Mistral vision grades it', async () => {
+  process.env.MISTRAL_API_KEY = 'test-mistral';
+  mockSb.setTable('assignments', [
+    { data: baseAssignmentRow({ grade: 'Grade 8', task_steps: [{ type: 'drawing', label: 'Draw a right triangle' }] }), error: null },
+    { data: baseAssignmentRow(), error: null },
+  ]);
+  mockSb.setTable('assignment_submissions', { data: {}, error: null });
+  mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/tri.jpg' });
+  mockGroqCreate
+    .mockRejectedValueOnce(new Error('[402 Payment Required] Your prepayment credits are depleted'))
+    .mockRejectedValueOnce(new Error('Groq 503 overloaded'))
+    .mockResolvedValueOnce(groqJson({ text: 'Great job!' }));
+  mockMistralVision.mockResolvedValueOnce('Here you go: {"answered":true,"score":82,"studentAnswer":"A right triangle with sides labelled.","correct":true,"comment":"Good!","teacherNote":""}');
+
+  const res = await request(app).post('/assignments/a1/submit').send({
+    studentId: STUDENT_UUID,
+    stepAnswers: [{ type: 'drawing', drawingBase64: 'ZmFrZS1pbWFnZS1kYXRh', drawingMime: 'image/png' }],
+  });
+  delete process.env.MISTRAL_API_KEY;
+
+  expect(res.status).toBe(200);
+  expect(res.body.perQuestion[0]).toMatchObject({ score: 82, needsReview: false });
+  const [images, prompt] = mockMistralVision.mock.calls[0];
+  expect(images[0].mime).toBe('image/png');
+  expect(prompt).toContain('Grade 8');
+});
+
+test('Gemini out of credits (402) falls back to Groq vision instead of Review', async () => {
+  process.env.GROQ_API_KEY = process.env.GROQ_API_KEY || 'test-groq';
+  mockSb.setTable('assignments', [
+    { data: baseAssignmentRow({ grade: 'Grade 8', task_steps: [{ type: 'drawing', label: 'Draw a right triangle' }] }), error: null },
+    { data: baseAssignmentRow(), error: null },
+  ]);
+  mockSb.setTable('assignment_submissions', { data: {}, error: null });
+  mockCloudinaryUpload.mockResolvedValue({ secure_url: 'https://res.cloudinary.com/evidence/tri.jpg' });
+  mockGroqCreate
+    .mockRejectedValueOnce(new Error('[402 Payment Required] Your prepayment credits are depleted'))
+    .mockResolvedValueOnce(Promise.resolve({ choices: [{ message: { content: '<think>checking</think>```json\n{"answered":true,"score":82,"studentAnswer":"A labelled right triangle.","correct":true,"comment":"Good!","teacherNote":""}\n```' } }] }))
+    .mockResolvedValueOnce(groqJson({ text: 'Great job!' }));
+
+  const res = await request(app).post('/assignments/a1/submit').send({
+    studentId: STUDENT_UUID,
+    stepAnswers: [{ type: 'drawing', drawingBase64: 'ZmFrZS1pbWFnZS1kYXRh', drawingMime: 'image/png' }],
+  });
+
+  expect(res.status).toBe(200);
+  expect(res.body.perQuestion[0]).toMatchObject({ score: 82, needsReview: false });
+  const visionCall = mockGroqCreate.mock.calls[1][0];
+  expect(visionCall.model).toBe('qwen/qwen3.8-27b');
+  expect(visionCall.messages[0].content[0].text).toContain('Grade 8');
+  expect(visionCall.messages[0].content[1].image_url.url).toBe('data:image/png;base64,ZmFrZS1pbWFnZS1kYXRh');
 });
