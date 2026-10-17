@@ -503,17 +503,50 @@ async function uploadSubmissionEvidence({ imageB64, imageMimeVal, id, studentId,
 // more image_url parts) and returns a graded result. On any failure (bad AI
 // response, parse error, API error) returns an explicit needsReview state -
 // score stays null so it can never be mistaken for a real AI-assigned score.
+// image_url part (data: URI or http URL) -> Gemini inlineData; null if it can't be loaded.
+async function toGeminiImagePart(url) {
+  const m = /^data:([^;]+);base64,(.+)$/s.exec(url);
+  if (m) return { inlineData: { mimeType: m[1], data: m[2] } };
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return null;
+    const mimeType = (res.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    if (!mimeType.startsWith('image/')) return null;
+    return { inlineData: { mimeType, data: Buffer.from(await res.arrayBuffer()).toString('base64') } };
+  } catch {
+    return null;
+  }
+}
+
+function drawingRubric(gradeLabel) {
+  return `For drawing/diagram tasks (judge against what a ${gradeLabel} student should know):
+- Accuracy (40%): shapes, labels, values and relationships are correct for the task (e.g. right angle marked, sides labelled correctly, correct parts named)
+- Relevance (30%): the drawing answers THIS task, not something else
+- Completeness & clarity (30%): every part the task asks for is present and readable
+- Accurate, complete, clearly labelled = 85-100%; mostly right with small errors = 60-80%; relevant but with major errors or missing parts = 30-55%
+- A blank page, a single scribble, or an off-topic/irrelevant image = 0-10%
+- Be specific about what you actually see drawn — do NOT invent elements that are not there`;
+}
+
+// Groq has no vision model on this account (llama-4 maverick/scout 404), so images go to Gemini.
 async function gradeVisionSubmission({ contentParts, gibberishCheckText }) {
   try {
-    const model = contentParts.some(p => p.type === 'image_url')
-      ? 'meta-llama/llama-4-maverick-17b-128e-instruct'
-      : 'openai/gpt-oss-120b';
-    const completion = await groq.chat.completions.create({
-      model,
-      messages: [{ role: 'user', content: contentParts.length === 1 ? contentParts[0].text : contentParts }],
-      ...(model === 'openai/gpt-oss-120b' ? { response_format: { type: 'json_object' } } : {}),
-    });
-    const raw = completion.choices[0].message.content.replace(/```json[\s\S]*?```|```/g, '').trim();
+    let raw;
+    if (contentParts.some(p => p.type === 'image_url')) {
+      if (!genAI) throw new Error('GEMINI_API_KEY not configured');
+      const { geminiModel } = require('../services/quizVision');
+      const parts = await Promise.all(contentParts.map(p => p.type === 'text' ? { text: p.text } : toGeminiImagePart(p.image_url.url)));
+      const result = await geminiModel({ responseMimeType: 'application/json', temperature: 0 }).generateContent(parts.filter(Boolean));
+      raw = result.response.text();
+    } else {
+      const completion = await groq.chat.completions.create({
+        model: 'openai/gpt-oss-120b',
+        messages: [{ role: 'user', content: contentParts[0].text }],
+        response_format: { type: 'json_object' },
+      });
+      raw = completion.choices[0].message.content;
+    }
+    raw = raw.replace(/```json|```/g, '').trim();
     const result = JSON.parse(raw);
     let score = Math.max(0, Math.min(100, Number(result.score) || 0));
     // Safety net: if the actual answer is gibberish/random characters, force
@@ -2181,13 +2214,7 @@ router.post('/:id/submit', clearNotificationsOnSuccess, async (req, res) => {
             type: 'text',
             text: `You are Aivorah, grading a ${assignment.grade || 'Grade 3'} ${assignment.curriculum || 'IB PYP'} student's ${q.type === 'drawing' ? 'drawing' : 'photo submission'} for "${q.question}" (${assignment.subject || ''}).
 
-For drawing tasks:
-- Relevance to topic (40%): does the drawing match the task?
-- Effort & detail (30%): recognizable elements, multiple items drawn
-- Completeness (30%): filled the space, attempted the whole task
-- A drawing with clear topic relevance = 60-85%
-- A blank page, a single scribble, or an off-topic/irrelevant image = 0-10%
-- Be specific about what you actually see drawn — do NOT invent elements that are not there
+${drawingRubric(assignment.grade || 'Grade 3')}
 Respond ONLY as JSON: {"answered":true,"score":0-100,"studentAnswer":"third-person factual description of exactly what is drawn/shown","correct":bool,"comment":"warm specific feedforward spoken directly to the student (use you)","teacherNote":"one concise third-person sentence for the teacher on what the student demonstrated or misunderstood"}`,
           }, { type: 'image_url', image_url: { url: `data:${imageMimeVal};base64,${imageAnswerB64}` } }];
 
@@ -2339,8 +2366,8 @@ JSON: {"text":"...","wellDone":"specific strength","improve":"one specific topic
           const filled = pAnswers.filter(a => a && a.trim());
           if (filled.length === 0) return { number: i+1, stepLabel, type: ans.type, answered: false, score: 0, studentAnswer: 'No answers written.', correct: false, comment: 'Try solving at least one problem next time! You can do it!' };
           answerDescription = problems.map(function(p,pi){return['Problem '+(pi+1)+': '+p,'Student answer: '+((pAnswers[pi]||'').trim()||'(blank)')].join(String.fromCharCode(10));}).join(String.fromCharCode(10,10));
-        } else if ((ans.type === 'drawing' || ans.type === 'photo') && ans.drawingBase64) {
-          // image-based step â€” handled via contentParts below
+        } else if (['drawing', 'photo', 'art_creation'].includes(ans.type) && ans.drawingBase64) {
+          // image-based step — handled via contentParts below
         } else if (ans.type === 'photo' && ans.photoBase64) {
           // photo upload
         } else {
@@ -2499,17 +2526,11 @@ Respond ONLY as JSON: {"answered":true,"score":0-100,"studentAnswer":"third-pers
           evidenceUrl = await uploadSubmissionEvidence({ imageB64, imageMimeVal, id, studentId, label: `step${i + 1}` });
 
           prompt = `You are Aivorah, grading a ${gradeLabel} ${currLabel} student's ${ans.type === 'drawing' ? 'drawing' : 'photo submission'} for "${assignment.title}" (${assignment.subject}).
-Step: "${stepLabel}" â€” ${step.instructions || ''}
+Step: "${stepLabel}" — ${step.instructions || ''}
 ${criteriaBlock}
-${worksheetUrls.length > 0 ? `The first ${worksheetUrls.length} image(s) are the ORIGINAL WORKSHEET for context. The LAST image is the STUDENT'S ${ans.type === 'drawing' ? 'DRAWING' : 'PHOTO'}.` : 'The image is the student\'s submission.'}
+${worksheetUrls.length > 0 ? `The first ${Math.min(worksheetUrls.length, 3)} image(s) are the ORIGINAL WORKSHEET for context. The LAST image is the STUDENT'S ${ans.type === 'drawing' ? 'DRAWING' : 'PHOTO'}.` : 'The image is the student\'s submission.'}
 
-For drawing tasks (Grade 3):
-- Relevance to topic (40%): does the drawing match the task?
-- Effort & detail (30%): recognizable elements, multiple items drawn
-- Completeness (30%): filled the space, attempted the whole task
-- Grade 3 drawing with clear topic relevance = 60-85%
-- A blank page, a single scribble, or an off-topic/irrelevant image = 0-10%
-- Be specific about what you actually see drawn — do NOT invent elements that are not there
+${drawingRubric(gradeLabel)}
 ${STRICT_RULE}
 Respond ONLY as JSON: {"answered":true,"score":0-100,"studentAnswer":"third-person factual description of exactly what is drawn/shown","correct":bool,"comment":"warm specific feedforward spoken directly to the student (use you)","teacherNote":"one concise third-person sentence for the teacher on what the student demonstrated or misunderstood"}`;
 

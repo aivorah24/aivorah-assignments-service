@@ -22,6 +22,18 @@ jest.mock('groq-sdk', () => jest.fn().mockImplementation(() => ({
   chat: { completions: { create: (...args) => mockGroqCreate(...args) } },
 })));
 
+// Image grading goes to Gemini; route it through the same mock queue so call order is unchanged.
+process.env.GEMINI_API_KEY = 'test-key';
+const mockGeminiGenerate = jest.fn(async (parts) => {
+  const r = await mockGroqCreate({ gemini: true, parts });
+  return { response: { text: () => r.choices[0].message.content } };
+});
+jest.mock('@google/generative-ai', () => ({
+  GoogleGenerativeAI: jest.fn().mockImplementation(() => ({
+    getGenerativeModel: () => ({ generateContent: (...args) => mockGeminiGenerate(...args) }),
+  })),
+}));
+
 const mockCloudinaryUpload = jest.fn();
 jest.mock('cloudinary', () => ({
   v2: { config: jest.fn(), uploader: { upload: (...args) => mockCloudinaryUpload(...args) } },
