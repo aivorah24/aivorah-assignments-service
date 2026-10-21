@@ -22,6 +22,7 @@ const {
   renderQuizHTML, autoDetectMCQ, normalizeMatchingTasks, normalizeVennQuestions,
   normalizeRiddleTables, normalizeLetterGridTables, normalizeTables, normalizeCharts,
   TRANSLIT_LANG_CODES,
+  TRANSLIT_ITC,
 } = require('../utils/quizHtmlRenderer');
 const { generateQuizFromImage, generateQuizFromPdf } = require('../services/quizVision');
 const { publishJob } = require('../services/jobQueue');
@@ -106,7 +107,7 @@ router.get('/transliterate', async (req, res) => {
   const lang = String(req.query.lang || '').trim().toLowerCase();
   if (!text || !TRANSLIT_LANG_CODES.includes(lang)) return res.json({ suggestions: [] });
   try {
-    const url = `https://inputtools.google.com/request?text=${encodeURIComponent(text)}&itc=${lang}-t-i0-und&num=5&cp=0&cs=1&ie=utf-8&oe=utf-8&app=aivorah`;
+    const url = `https://inputtools.google.com/request?text=${encodeURIComponent(text)}&itc=${TRANSLIT_ITC(lang)}&num=5&cp=0&cs=1&ie=utf-8&oe=utf-8&app=aivorah`;
     const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
     const data = await r.json();
     const suggestions = data?.[0] === 'SUCCESS' && Array.isArray(data[1]?.[0]?.[1]) ? data[1][0][1].slice(0, 5) : [];

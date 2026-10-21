@@ -39,9 +39,10 @@ describe('POST /assignments/generate-ibpyp — success', () => {
       purpose: 'Understand fractions as parts of a whole.',
       learningOutcomes: ['Identify fractions', 'Compare fractions'],
       taskSteps: [
-        { label: 'Pizza Sharing', instructions: 'Think about sharing.', provocation: 'You share a pizza with 3 friends.' },
-        { label: 'Fraction Challenges', instructions: 'Solve the problems.', problems: ['1/2 + 1/4 = ?'] },
-        { label: 'Reflect', instructions: 'Reflect on your strategy.', reflectionPrompts: ['What was tricky?'] },
+        { type: 'tuning_in', label: 'Pizza Sharing', instructions: 'Think about sharing.', provocation: 'You share a pizza with 3 friends.' },
+        { type: 'problem_solving', label: 'Fraction Challenges', instructions: 'Solve the problems.', problems: ['1/2 + 1/4 = ?'] },
+        { type: 'research_notes', label: 'Fractions Around Us', instructions: 'Find fractions at home.', sections: ['Where I Found Them', 'What They Mean'] },
+        { type: 'math_reflection', label: 'Reflect', instructions: 'Reflect on your strategy.', reflectionPrompts: ['What was tricky?'] },
       ],
       wordBank: ['fraction', 'numerator', 'denominator'],
     }));
@@ -54,7 +55,9 @@ describe('POST /assignments/generate-ibpyp — success', () => {
     expect(res.body.purpose).toBeTruthy();
     expect(Array.isArray(res.body.learningOutcomes)).toBe(true);
     expect(Array.isArray(res.body.taskSteps)).toBe(true);
-    expect(res.body.taskSteps.length).toBe(3);
+    // The AI decides how many steps and which kinds — kept as sent
+    expect(res.body.taskSteps.map(t => t.type)).toEqual(['tuning_in', 'problem_solving', 'research_notes', 'math_reflection']);
+    expect(mockGroqCreate.mock.calls[0][0].messages[0].content).not.toMatch(/Step types MUST be exactly/);
   });
 
   test('never sends the decommissioned model name to Groq', async () => {
