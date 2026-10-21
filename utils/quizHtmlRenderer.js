@@ -575,15 +575,24 @@ const WORKSHEET_LANGS = [
   { code: 'or', name: 'Odia',      re: /[\u0B00-\u0B7F]/, label: 'ଓ',  translit: true },
   { code: 'ur', name: 'Urdu',      re: null,               label: 'اُ', translit: true },
   { code: 'ar', name: 'Arabic',    re: /[\u0600-\u06FF]/, label: 'ع',  translit: true },
-  { code: 'zh', name: 'Mandarin',  re: /[\u4E00-\u9FFF]/, label: '中', translit: false },
-  { code: 'ja', name: 'Japanese',  re: /[\u3040-\u30FF]/, label: 'あ', translit: false },
-  { code: 'ko', name: 'Korean',    re: /[\uAC00-\uD7AF]/, label: '한', translit: false },
-  { code: 'ru', name: 'Russian',   re: /[\u0400-\u04FF]/, label: 'Ру', translit: false },
-  { code: 'el', name: 'Greek',     re: /[\u0370-\u03FF]/, label: 'Ελ', translit: false },
+  { code: 'as', name: 'Assamese',  re: null,               label: 'অ',  translit: true },
+  { code: 'fa', name: 'Persian',   re: null,               label: 'فا', translit: true },
+  { code: 'th', name: 'Thai',      re: /[฀-๿]/, label: 'ท',  translit: true },
+  // Japanese before Mandarin: kana marks Japanese, Han alone means Chinese
+  { code: 'ja', name: 'Japanese',  re: /[぀-ヿ]/, label: 'あ', translit: true },
+  { code: 'zh', name: 'Mandarin',  re: /[一-鿿]/, label: '中', translit: true },
+  { code: 'ko', name: 'Korean',    re: /[가-힯]/, label: '한', translit: false },
+  { code: 'ru', name: 'Russian',   re: /[Ѐ-ӿ]/, label: 'Ру', translit: true },
+  { code: 'el', name: 'Greek',     re: /[Ͱ-Ͽ]/, label: 'Ελ', translit: true },
   { code: 'fr', name: 'French',    re: null,               label: 'FR', translit: false },
   { code: 'es', name: 'Spanish',   re: null,               label: 'ES', translit: false },
   { code: 'de', name: 'German',    re: null,               label: 'DE', translit: false },
+  { code: 'nl', name: 'Dutch',     re: null,               label: 'NL', translit: false },
+  { code: 'it', name: 'Italian',   re: null,               label: 'IT', translit: false },
+  { code: 'pt', name: 'Portuguese', re: null,              label: 'PT', translit: false },
 ];
+// Google Input Tools method per code; Chinese is typed as pinyin
+const TRANSLIT_ITC = (code) => (code === 'zh' ? 'zh-t-i0-pinyin' : `${code}-t-i0-und`);
 const TRANSLIT_LANG_CODES = WORKSHEET_LANGS.filter(l => l.translit).map(l => l.code);
 
 function findLang(v) {
@@ -2746,7 +2755,7 @@ function autoDetectMCQ(quiz) {
 }
 
 module.exports = {
-  resolveQuizLanguage, WORKSHEET_LANGS, TRANSLIT_LANG_CODES,
+  resolveQuizLanguage, WORKSHEET_LANGS, TRANSLIT_LANG_CODES, TRANSLIT_ITC,
   renderQuizHTML, solveVerticalMath, normalizeVennQuestions, renderBarChart, stripImagesForStructuredTasks,
   autoDetectMCQ, normalizeMatchingTasks, normalizeRiddleTables, normalizeLetterGridTables, normalizeTables, normalizeCharts,
 };

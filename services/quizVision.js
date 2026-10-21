@@ -1235,7 +1235,7 @@ const GROQ_OUTPUT_TRUNCATED = 'GROQ_OUTPUT_TRUNCATED';
 // checked explicitly rather than trusted to "probably not happen again".
 async function callGroqWithText(promptText, { maxTokens = 16000 } = {}) {
   const Groq = require('groq-sdk');
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  const groq = require('./groqResilient').withTextFallback(new Groq({ apiKey: process.env.GROQ_API_KEY }));
   try {
     const completion = await groq.chat.completions.create({
       model: 'openai/gpt-oss-120b',

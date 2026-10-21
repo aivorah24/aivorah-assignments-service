@@ -28,36 +28,34 @@ describe('POST /assignments/generate-steps — validation', () => {
   });
 });
 
-describe('POST /assignments/generate-steps — IB PYP subject-aware step types', () => {
-  test('uses the Mathematics step-type triplet and returns all 3 real steps', async () => {
-    mockGroqCreate.mockResolvedValue(groqJson({
-      tuning_in:        { label: 'Warm-up', instructions: 'Think about fractions.' },
-      problem_solving:  { label: 'Solve it', instructions: 'Solve the fraction problem.' },
-      math_reflection:  { label: 'Reflect', instructions: 'Explain your thinking.' },
-    }));
-
+describe('POST /assignments/generate-steps — AI-designed steps', () => {
+  test('returns the steps the AI chose (count and kinds), not a fixed template', async () => {
+    mockGroqCreate.mockResolvedValue(groqJson({ taskSteps: [
+      { type: 'tuning_in', label: 'Pizza share', instructions: 'Read and think.', provocation: 'You share a pizza...' },
+      { type: 'problem_solving', label: 'Solve it', instructions: 'Solve.', problems: ['1/2 + 1/4 = ?', '3/4 of 8 = ?'] },
+    ] }));
     const res = await request(app).post('/assignments/generate-steps').send({
-      topic: 'Fractions', subject: 'Mathematics', grade: 'Grade 4', curriculum: 'IB PYP',
+      topic: 'Fractions', subject: 'Mathematics', grade: 'Grade 4', curriculum: 'CBSE',
     });
-
     expect(res.status).toBe(200);
-    expect(res.body.steps.map(s => s.type)).toEqual(['tuning_in', 'problem_solving', 'math_reflection']);
-    expect(res.body.steps[0].label).toBe('Warm-up');
+    expect(res.body.stepTypes).toEqual(['tuning_in', 'problem_solving']);
+    expect(res.body.steps[1].problems).toHaveLength(2);
+    const prompt = mockGroqCreate.mock.calls[0][0].messages[0].content;
+    expect(prompt).toMatch(/Decide the NUMBER of steps/);
+    expect(prompt).toMatch(/Use "drawing" only if the learning outcome is genuinely visual/);
   });
 
-  test('non-IB curricula fall back to the generic brainstorm/drawing/structured_writing types', async () => {
-    mockGroqCreate.mockResolvedValue(groqJson({
-      brainstorm:          { label: 'Brainstorm', instructions: 'List ideas.' },
-      drawing:             { label: 'Draw it', instructions: 'Draw a diagram.' },
-      structured_writing:  { label: 'Write', instructions: 'Write a paragraph.' },
-    }));
-
+  test('language assignments drop any drawing step and pass the target language', async () => {
+    mockGroqCreate.mockResolvedValue(groqJson({ taskSteps: [
+      { type: 'drawing', label: 'Draw', instructions: 'Draw nature.' },
+      { type: 'language_practice', label: 'लिखो', instructions: 'Write sentences.', sections: ['शब्द', 'वाक्य'] },
+    ] }));
     const res = await request(app).post('/assignments/generate-steps').send({
-      topic: 'Water cycle', subject: 'Science', grade: 'Grade 4', curriculum: 'CBSE',
+      topic: 'प्रकृति', subject: 'Language Acquisition', grade: 'Grade 4', curriculum: 'CBSE', language: 'Hindi',
     });
-
     expect(res.status).toBe(200);
-    expect(res.body.steps.map(s => s.type)).toEqual(['brainstorm', 'drawing', 'structured_writing']);
+    expect(res.body.stepTypes).toEqual(['language_practice']);
+    expect(mockGroqCreate.mock.calls[0][0].messages[0].content).toMatch(/Target language: Hindi/);
   });
 });
 
@@ -73,5 +71,24 @@ describe('POST /assignments/generate-steps — real failure handling', () => {
     const res = await request(app).post('/assignments/generate-steps').send({ topic: 'Fractions' });
     expect(res.status).toBe(500);
     expect(res.body.error).toMatch(/invalid structure/);
+  });
+});
+
+describe('POST /assignments/generate-step — one teacher-added step', () => {
+  test('writes the step the teacher titled, keeping their title', async () => {
+    mockGroqCreate.mockResolvedValue(groqJson({ taskSteps: [{ type: 'drawing', label: 'Air flow diagram',
+      instructions: 'Draw a cross-section of an aeroplane wing. Show faster air flow above the wing with longer arrows and slower air below, and label: high pressure, low pressure, lift, air flow.' }] }));
+    const res = await request(app).post('/assignments/generate-step').send({
+      type: 'drawing', label: 'Draw the air flow and pressure', topic: 'Air pressure', subject: 'Science', grade: 'Grade 8', curriculum: 'CBSE',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.step.label).toBe('Draw the air flow and pressure');
+    expect(res.body.step.instructions).toMatch(/label/i);
+    expect(mockGroqCreate.mock.calls[0][0].messages[0].content).toMatch(/Draw the air flow and pressure/);
+  });
+
+  test('rejects a step type the subject cannot use', async () => {
+    const res = await request(app).post('/assignments/generate-step').send({ type: 'drawing', topic: 'Family', subject: 'Language Acquisition' });
+    expect(res.status).toBe(400);
   });
 });
