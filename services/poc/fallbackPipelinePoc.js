@@ -142,10 +142,10 @@ async function normalizeDocument(buffer, filename) {
 // per-page text, Stage 1 has no way to honestly report which page a
 // question came from (see associateVisualsToQuestionsV2 below).
 async function rasterizePdfPerPage(pdfBuffer, { maxPages = 8 } = {}) {
-  const puppeteer = require('puppeteer');
+  const { launchBrowser } = require('../../utils/browser');
   const pdfjsSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.js'), 'utf8');
   const pdfjsWorkerSrc = fs.readFileSync(require.resolve('pdfjs-dist/build/pdf.worker.js'), 'utf8');
-  const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  const browser = await launchBrowser();
   try {
     const page = await browser.newPage();
     await page.addScriptTag({ content: pdfjsSrc });

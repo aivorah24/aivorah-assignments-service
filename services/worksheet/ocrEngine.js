@@ -100,8 +100,8 @@ const workers = new Map(); // langKey → worker (kept warm for the pages of one
 async function getWorker(langs, { legacy = false } = {}) {
   const key = `${legacy ? 'L:' : ''}${langs.join('+')}`;
   if (workers.has(key)) return workers.get(key);
-  // Keep at most two warm workers.
-  if (workers.size >= 2) {
+  // One warm worker: each Tesseract WASM worker is ~200 MB and Render has 512 MB.
+  if (workers.size >= 1) {
     const [oldKey, old] = workers.entries().next().value;
     workers.delete(oldKey);
     await old.terminate().catch(() => {});

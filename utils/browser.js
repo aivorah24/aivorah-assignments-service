@@ -33,15 +33,35 @@ function findBrowser({ env = process.env, platform = process.platform, exists = 
   return (SYSTEM_BROWSERS[platform] || []).find(p => exists(p)) || null;
 }
 
+// Render's 512 MB box can't hold two Chromes (or Chrome + warm OCR): one at a time.
+const LOW_MEMORY_ARGS = [
+  '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
+  '--no-zygote', '--renderer-process-limit=1', '--disable-extensions', '--mute-audio',
+];
+let chain = Promise.resolve();
+
 async function launchBrowser(extraArgs = []) {
   const executablePath = findBrowser();
   if (!executablePath) {
     throw new Error('No Chrome or Edge found to convert this document. In aivorah-assignments-service run '
       + '"npx puppeteer browsers install chrome", or set PUPPETEER_EXECUTABLE_PATH to an installed Chrome/Edge.');
   }
-  return require('puppeteer').launch({
-    executablePath, headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox', ...extraArgs],
-  });
+  let release;
+  const turn = new Promise(r => { release = r; });
+  const prev = chain;
+  chain = chain.then(() => turn);
+  await prev;
+  try {
+    await require('../services/worksheet/ocrEngine').terminateWorkers();
+    const browser = await require('puppeteer').launch({
+      executablePath, headless: 'new', args: [...new Set([...LOW_MEMORY_ARGS, ...extraArgs])],
+    });
+    browser.once('disconnected', release);
+    return browser;
+  } catch (err) {
+    release();
+    throw err;
+  }
 }
 
-module.exports = { findBrowser, launchBrowser, SYSTEM_BROWSERS };
+module.exports = { findBrowser, launchBrowser, SYSTEM_BROWSERS, LOW_MEMORY_ARGS };

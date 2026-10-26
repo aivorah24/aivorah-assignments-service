@@ -303,7 +303,8 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     ...ocr.scriptsInText(structuredText),
     ...ocr.scriptsFromHints(hints),
   ]);
-  if (ocrEnabled && rasters.length && !scripts.size) {
+  const hasTextLayer = layout.pages.some(p => p.lines.length > 0) || !!structuredText;
+  if (ocrEnabled && rasters.length && !scripts.size && !hasTextLayer) {
     // Nothing tells us the language (scan/photo): ask Tesseract's script detector.
     const detected = await safe('script detection', () => ocr.detectScript(rasters[0].buffer), null);
     if (detected && detected !== 'Latin') scripts.add(detected);
