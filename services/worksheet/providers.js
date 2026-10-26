@@ -6,7 +6,7 @@
 //   - a cached health check so a dead key shows up as a status, not as
 //     silently degraded quizzes.
 const MISTRAL_URL = 'https://api.mistral.ai/v1/chat/completions';
-const MISTRAL_VISION_MODELS = (process.env.MISTRAL_VISION_MODEL || 'mistral-medium-latest,pixtral-large-latest')
+const MISTRAL_VISION_MODELS = (process.env.MISTRAL_VISION_MODEL || 'mistral-medium-latest,mistral-small-latest')
   .split(',').map(m => m.trim()).filter(Boolean);
 const MISTRAL_MAX_IMAGES = 8;
 const MISTRAL_TIMEOUT_MS = parseInt(process.env.MISTRAL_TIMEOUT_MS || '90000', 10);
@@ -53,7 +53,7 @@ async function callMistralVision(pageImages, prompt) {
       lastErr = err;
       // A retired/unknown model or overload moves on to the next; auth/quota errors won't improve.
       if (!/404|400|invalid model|not found|429|503|overloaded|timeout|aborted/i.test(String(err.message))) throw err;
-      console.log(`[mistral] ${model} unavailable, trying next model`);
+      console.log(`[mistral] ${model} unavailable (${String(err.message).slice(0, 120)}), trying next model`);
     }
   }
   throw lastErr;
