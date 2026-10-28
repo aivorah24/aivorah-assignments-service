@@ -40,6 +40,32 @@ function assignmentAssignedEvent(assignment, { studentIds, actorEmail, actorRole
   };
 }
 
+function assignmentFeedbackEvent(assignment, { studentId, feedback, version, actorEmail, edited = false }) {
+  const label = assignment?.type === 'quiz' ? 'quiz' : 'assignment';
+  const name = assignment?.title ? `: ${assignment.title}` : '';
+  const text = String(feedback || '').trim();
+  const body = text.length > 140 ? `${text.slice(0, 137)}...` : text;
+  return {
+    type: 'assignment_feedback',
+    entity_type: 'assignment',
+    entity_id: String(assignment?.id),
+    version,
+    student_ids: [studentId],
+    actor_email: actorEmail || null,
+    actor_role: 'teacher',
+    title: `${edited ? 'Teacher updated feedback' : 'Teacher feedback'} on your ${label}${name}`,
+    body: body || null,
+    parent_title: `${edited ? 'Teacher updated feedback' : 'Teacher feedback'} for {child}${name}`,
+    parent_body: body || null,
+    data: {
+      assignmentId: String(assignment?.id),
+      assignmentType: assignment?.type || 'assignment',
+      subject: assignment?.subject || null,
+      edited,
+    },
+  };
+}
+
 async function createNotificationEvent(evt) {
   const base = { evt: 'notification.create', type: evt.type, entityType: evt.entity_type, entity: evt.entity_id };
   if (!evt.student_ids?.length) {
@@ -85,4 +111,4 @@ async function clearNotificationsForEntity({ entityId, studentId, reason }) {
   }
 }
 
-module.exports = { assignmentAssignedEvent, createNotificationEvent, clearNotificationsForEntity, formatDue };
+module.exports = { assignmentAssignedEvent, assignmentFeedbackEvent, createNotificationEvent, clearNotificationsForEntity, formatDue };
