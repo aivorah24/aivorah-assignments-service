@@ -1489,8 +1489,8 @@ async function generateQuizFromPdf(pdfBuffer, { grade, subject, school, structur
 // ── Provider-agnostic worksheet → quiz ────────────────────────────────────
 // 1. Document model (no AI): per-page text layer + OCR + pictures placed
 //    inline (services/worksheet/documentModel.js).
-// 2. First provider that answers, each given that transcript as ground truth:
-//    Gemini vision (whole PDF/image) → Mistral vision (page images) → Groq
+// 2. First provider that answers: Gemini vision (whole PDF/image, started in
+//    parallel with step 1) → Mistral vision (page images + transcript) → Groq
 //    text (transcript only). Only the last is "text-only".
 // 3. The same post-processing for every provider.
 // Root cause this replaces (2026-10-13): with Gemini unavailable every
@@ -1513,31 +1513,73 @@ async function buildWorksheetDocument({ buffer, mime, structuredText, hints }) {
   }
 }
 
+const EMPTY_WORKSHEET_MESSAGE = 'This worksheet has no content — no text or pictures were found. Please upload a worksheet with questions.';
+const NO_QUESTIONS_MESSAGE = 'No questions were found in this worksheet. Please check the file and upload it again.';
+const EMPTY_MIN_CHARS = 20;
+const EMPTY_MAX_PATHS = 20;
+
+function worksheetError(message, code) {
+  const err = new Error(message);
+  err.status = 422;
+  err.code = code;
+  return err;
+}
+
+// About a second, no AI: fail before the multi-minute pipeline.
+async function assertPdfHasContent(buffer, structuredText) {
+  if ((String(structuredText || '').match(/[\p{L}\p{N}]/gu) || []).length >= EMPTY_MIN_CHARS) return;
+  let census;
+  try {
+    census = await require('./worksheet/pdfLayout').inspectPdfContent(buffer);
+  } catch (err) {
+    console.warn('[quiz] content census failed, continuing:', err.message);
+    return;
+  }
+  if (census.textChars < EMPTY_MIN_CHARS && census.images === 0 && census.paths < EMPTY_MAX_PATHS) {
+    throw worksheetError(EMPTY_WORKSHEET_MESSAGE, 'EMPTY_WORKSHEET');
+  }
+}
+
 async function generateQuizFromDocument({ buffer, mime, grade, subject, school, structuredText, language } = {}) {
   const { callMistralVision, transcriptBlock } = require('./worksheet/providers');
   const isPdf = /pdf/i.test(mime || '');
-  const doc = await buildWorksheetDocument({ buffer, mime, structuredText, hints: [language, subject] });
-  const transcript = doc && doc.text ? doc.text : (structuredText || '');
+  if (isPdf) await assertPdfHasContent(buffer, structuredText);
   const basePrompt = buildQuizVisionPrompt({ grade, subject, school });
+  let transcript = structuredText || '';
+
+  // Gemini reads the original file natively, so it runs alongside the
+  // document model instead of waiting ~100 s for its transcript.
+  const geminiAttempt = (async () => {
+    try {
+      const parts = isPdf ? [geminiPdfPart(buffer)] : geminiImageParts([{ buffer, mime }]);
+      let prompt = basePrompt;
+      if (structuredText && structuredText.trim().length > 20) {
+        prompt += `\n\nGROUND TRUTH TEXT (extracted with 100% accuracy from the original document, including exact table cell values marked with [TABLE]/[/TABLE]): use these EXACT values for any text/numbers/table cells.\n\n${structuredText.slice(0, 12000)}`;
+      }
+      if (!genAI) throw new Error('GEMINI_API_KEY not configured');
+      const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
+      const geminiBudget = process.env.MISTRAL_API_KEY ? Math.min(GEMINI_TIMEOUT_WITH_FALLBACK_MS, GEMINI_VISION_TIMEOUT_MS) : GEMINI_VISION_TIMEOUT_MS;
+      const geminiRaw = await withTimeout(geminiGenerate(model, [...parts, { text: prompt }]), geminiBudget, 'gemini-vision');
+      return {
+        raw: geminiRaw,
+        retryFn: (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt + transcriptBlock(transcript, { canSeePages: true }) }]),
+      };
+    } catch (geminiErr) {
+      classifyProviderError('gemini', geminiErr);
+      return null;
+    }
+  })();
+
+  const doc = await buildWorksheetDocument({ buffer, mime, structuredText, hints: [language, subject] });
+  if (doc && doc.text) transcript = doc.text;
 
   let raw, retryFn, provider;
   let sourceText = transcript;
 
-  // Gemini: reads the original file natively.
-  try {
-    const parts = isPdf ? [geminiPdfPart(buffer)] : geminiImageParts([{ buffer, mime }]);
-    let prompt = basePrompt + transcriptBlock(transcript, { canSeePages: true });
-    if (structuredText && structuredText.trim().length > 20 && !doc) {
-      prompt += `\n\nGROUND TRUTH TEXT (extracted with 100% accuracy from the original document, including exact table cell values marked with [TABLE]/[/TABLE]): use these EXACT values for any text/numbers/table cells.\n\n${structuredText.slice(0, 12000)}`;
-    }
-    if (!genAI) throw new Error('GEMINI_API_KEY not configured');
-    const model = geminiModel({ responseMimeType: 'application/json', temperature: 0 });
-    const geminiBudget = process.env.MISTRAL_API_KEY ? Math.min(GEMINI_TIMEOUT_WITH_FALLBACK_MS, GEMINI_VISION_TIMEOUT_MS) : GEMINI_VISION_TIMEOUT_MS;
-    raw = await withTimeout(geminiGenerate(model, [...parts, { text: prompt }]), geminiBudget, 'gemini-vision');
-    retryFn = (retryPrompt) => geminiGenerate(model, [...parts, { text: retryPrompt + transcriptBlock(transcript, { canSeePages: true }) }]);
+  const gemini = await geminiAttempt;
+  if (gemini) {
+    ({ raw, retryFn } = gemini);
     provider = 'gemini';
-  } catch (geminiErr) {
-    classifyProviderError('gemini', geminiErr);
   }
 
   // Mistral: looks at the rendered pages.
@@ -1573,6 +1615,10 @@ async function generateQuizFromDocument({ buffer, mime, grade, subject, school, 
   const visualUnderstandingAvailable = provider === 'gemini' || provider === 'mistral';
   const quiz = applyExplicitMetadata(normalizeQuestionFields(parseQuizResponse(raw)), sourceText);
   const result = applyExplicitMetadata(normalizeQuestionFields(await retryIncompleteTasks(quiz, retryFn)), sourceText);
+  if (!Array.isArray(result.tasks) || !result.tasks.length) {
+    console.warn(`[quiz] ${provider} returned no tasks`);
+    throw worksheetError(NO_QUESTIONS_MESSAGE, 'NO_QUESTIONS');
+  }
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   result.provider = provider;
   if (doc) {
@@ -1614,4 +1660,5 @@ module.exports = {
   buildConversionReport, taskHasRealContent, validateQuestionInteraction, estimateSourceSectionCount,
   GROQ_OUTPUT_TRUNCATED,
   extractExplicitMetadata, applyExplicitMetadata, findMissingNamedBlocks,
+  assertPdfHasContent, EMPTY_WORKSHEET_MESSAGE, NO_QUESTIONS_MESSAGE,
 };

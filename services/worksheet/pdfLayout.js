@@ -150,4 +150,30 @@ async function readPdfLayout(pdfBuffer, opts = {}) {
   }
 }
 
-module.exports = { readPdfLayout, itemsToLines };
+// Fast (no Chrome, no image decoding) census for the "empty worksheet" check.
+// Vector paths count too: some exporters outline text into shapes.
+async function inspectPdfContent(pdfBuffer, { maxPages = 10 } = {}) {
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(pdfBuffer), isEvalSupported: false, disableFontFace: true, verbosity: 0,
+  }).promise;
+  const census = { numPages: doc.numPages, textChars: 0, images: 0, paths: 0 };
+  try {
+    for (let p = 1; p <= Math.min(doc.numPages, maxPages); p++) {
+      const page = await doc.getPage(p);
+      const content = await page.getTextContent();
+      for (const item of content.items) census.textChars += (String(item.str || '').match(/[\p{L}\p{N}]/gu) || []).length;
+      const ops = await page.getOperatorList();
+      for (const fn of ops.fnArray) {
+        if (fn === pdfjs.OPS.paintImageXObject || fn === pdfjs.OPS.paintImageXObjectRepeat || fn === pdfjs.OPS.paintInlineImageXObject) census.images++;
+        else if (fn === pdfjs.OPS.constructPath) census.paths++;
+      }
+      page.cleanup();
+    }
+    return census;
+  } finally {
+    await doc.destroy().catch(() => {});
+  }
+}
+
+module.exports = { readPdfLayout, itemsToLines, inspectPdfContent };
