@@ -94,6 +94,79 @@ describe('PUT /assignments/:id/teacher-feedback', () => {
     expect(res.body.feedback.teacherFeedbackAt).toBeTruthy();
   });
 
+  test('notifies the student + parents in the bell with the feedback text', async () => {
+    mockSb.setTable('assignment_submissions', [
+      { data: { ai_feedback: null }, error: null },
+      { data: null, error: null },
+    ]);
+    mockSb.setTable('assignments', { data: { id: 'a1', title: 'Fractions', subject: 'Mathematics', type: 'assignment' }, error: null });
+    mockSb.setTable('rpc:notify_event', { data: { inserted: [{ id: 'n1' }], recipients: 2 }, error: null });
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    const res = await request(app).put('/assignments/a1/teacher-feedback')
+      .send({ studentId: STUDENT_UUID, feedback: 'Great job!', teacherEmail: 'T@x.com' });
+    logSpy.mockRestore();
+
+    expect(res.status).toBe(200);
+    const [fn, args] = mockSb.supabase.rpc.mock.calls.at(-1);
+    expect(fn).toBe('notify_event');
+    expect(args.p_event).toMatchObject({
+      type: 'assignment_feedback', entity_type: 'assignment', entity_id: 'a1',
+      student_ids: [STUDENT_UUID], actor_email: 't@x.com', actor_role: 'teacher',
+      title: 'Teacher feedback on your assignment: Fractions', body: 'Great job!',
+      parent_title: 'Teacher feedback for {child}: Fractions',
+      version: res.body.feedback.teacherFeedbackAt,
+    });
+  });
+
+  test('editing sent feedback keeps the first send time, stamps the edit and notifies as updated', async () => {
+    mockSb.setTable('assignment_submissions', [
+      { data: { ai_feedback: JSON.stringify({ teacherFeedback: 'Good', teacherFeedbackAt: '2026-10-01T00:00:00.000Z' }) }, error: null },
+      { data: null, error: null },
+    ]);
+    mockSb.setTable('assignments', { data: { id: 'a1', title: 'Fractions', type: 'assignment' }, error: null });
+    mockSb.setTable('rpc:notify_event', { data: { inserted: [] }, error: null });
+    mockSb.supabase.rpc.mockClear();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    const res = await request(app).put('/assignments/a1/teacher-feedback').send({ studentId: STUDENT_UUID, feedback: 'Good, show your working' });
+    logSpy.mockRestore();
+
+    expect(res.body.feedback).toMatchObject({ teacherFeedback: 'Good, show your working', teacherFeedbackAt: '2026-10-01T00:00:00.000Z' });
+    expect(res.body.feedback.teacherFeedbackEditedAt).toBeTruthy();
+    const evt = mockSb.supabase.rpc.mock.calls.at(-1)[1].p_event;
+    expect(evt.title).toBe('Teacher updated feedback on your assignment: Fractions');
+    expect(evt.version).toBe(res.body.feedback.teacherFeedbackEditedAt);
+  });
+
+  test('re-saving identical feedback sends no new notification', async () => {
+    mockSb.setTable('assignment_submissions', [
+      { data: { ai_feedback: JSON.stringify({ teacherFeedback: 'Good' }) }, error: null },
+      { data: null, error: null },
+    ]);
+    mockSb.supabase.rpc.mockClear();
+
+    const res = await request(app).put('/assignments/a1/teacher-feedback').send({ studentId: STUDENT_UUID, feedback: 'Good' });
+
+    expect(res.status).toBe(200);
+    expect(mockSb.supabase.rpc).not.toHaveBeenCalled();
+  });
+
+  test('a failed notification never fails the saved feedback', async () => {
+    mockSb.setTable('assignment_submissions', [
+      { data: { ai_feedback: null }, error: null },
+      { data: null, error: null },
+    ]);
+    mockSb.setTable('rpc:notify_event', { data: null, error: { message: 'boom' } });
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    const res = await request(app).put('/assignments/a1/teacher-feedback').send({ studentId: STUDENT_UUID, feedback: 'Great job!' });
+    logSpy.mockRestore();
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
+
   test('a real Supabase error saving feedback returns 500', async () => {
     mockSb.setTable('assignment_submissions', [
       { data: { ai_feedback: null }, error: null },
