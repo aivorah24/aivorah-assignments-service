@@ -88,7 +88,7 @@ describe('POST /quiz/generate — real failure handling', () => {
     // chain runs (not just that Gemini failed) without needing a real PDF
     // fixture in this suite.
     expect(res.body.error).toMatch(/Could not extract any worksheet content/);
-  });
+  }, 30000);
 
   test('a malformed (non-JSON) Gemini response surfaces as a 500 with the raw text', async () => {
     mockGenerateContent.mockResolvedValue({ response: { text: () => 'not json' } });

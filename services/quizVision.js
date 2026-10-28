@@ -922,6 +922,59 @@ function findMissingNamedBlocks(quiz, sourceText) {
   return missing;
 }
 
+// The AI (often the text-only fallback) sometimes drops a task's story/passage
+// or worked example. Copy them back verbatim from that task's section of the
+// source text; never overwrites what the AI did return.
+const PASSAGE_MIN_CHARS = 150;
+const matchKey = s => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+function sourceTaskSections(sourceText) {
+  const text = String(sourceText || '');
+  const starts = [];
+  const seen = new Set();
+  for (const m of text.matchAll(/\bTask\s*(\d+)\s*[:.\-–)]/gi)) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    starts.push({ num: m[1], index: m.index });
+  }
+  starts.sort((a, b) => a.index - b.index);
+  const sections = new Map();
+  starts.forEach((s, i) => sections.set(s.num, text.slice(s.index, i + 1 < starts.length ? starts[i + 1].index : undefined)));
+  return sections;
+}
+
+function recoverTaskPassages(quiz, sourceText) {
+  const sections = sourceTaskSections(sourceText);
+  if (!sections.size) return quiz;
+  for (const task of quiz.tasks || []) {
+    const num = (String(task.title || '').match(/\bTask\s*(\d+)/i) || [])[1];
+    const section = num && sections.get(num);
+    if (!section) continue;
+    const questions = Array.isArray(task.questions) ? task.questions : [];
+    const existing = matchKey([task.title, task.passage, task.instructions, ...questions.flatMap(q => [q.question, q.example])].join(' '));
+    const lines = section.split('\n').map(l => l.replace(/^[\s|]+|[\s|]+$/g, '')).filter(Boolean);
+
+    if (!task.passage) {
+      const prose = lines.filter(l => l.length >= PASSAGE_MIN_CHARS
+        && !/\bTask\s*\d+/i.test(l) && !/^\[/.test(l) && !l.includes('?') && !/_{3,}/.test(l) && !/\s\|\s/.test(l)
+        && (l.match(/[.!](\s|$)/g) || []).length >= 2
+        && !existing.includes(matchKey(l).slice(0, 60)));
+      if (prose.length) {
+        task.passage = prose.join('\n\n').replace(/\s+([.,!;:])/g, '$1');
+        task.passageRecovered = true;
+      }
+    }
+
+    if (questions.length && !questions.some(q => q.example)) {
+      const example = lines.map(l => (l.match(/^Example\s*:\s*(.+)$/i) || [])[1]).find(e => e
+        && (e.match(/\p{L}+/gu) || []).length >= 3 && !/_{3,}/.test(e) && !/\s\|\s/.test(e)
+        && !existing.includes(matchKey(e)));
+      if (example) questions[0].example = example.trim();
+    }
+  }
+  return quiz;
+}
+
 // Text-only conversions: a number in a question that appears nowhere in the
 // worksheet transcript was guessed (e.g. fractions printed as a picture the
 // OCR couldn't read). Those tasks are flagged for review, never passed off as
@@ -1619,6 +1672,7 @@ async function generateQuizFromDocument({ buffer, mime, grade, subject, school, 
     console.warn(`[quiz] ${provider} returned no tasks`);
     throw worksheetError(NO_QUESTIONS_MESSAGE, 'NO_QUESTIONS');
   }
+  recoverTaskPassages(result, [sourceText, structuredText].filter(Boolean).join('\n'));
   result.visualUnderstandingAvailable = visualUnderstandingAvailable;
   result.provider = provider;
   if (doc) {
@@ -1660,5 +1714,5 @@ module.exports = {
   buildConversionReport, taskHasRealContent, validateQuestionInteraction, estimateSourceSectionCount,
   GROQ_OUTPUT_TRUNCATED,
   extractExplicitMetadata, applyExplicitMetadata, findMissingNamedBlocks,
-  assertPdfHasContent, EMPTY_WORKSHEET_MESSAGE, NO_QUESTIONS_MESSAGE,
+  assertPdfHasContent, EMPTY_WORKSHEET_MESSAGE, NO_QUESTIONS_MESSAGE, recoverTaskPassages,
 };
