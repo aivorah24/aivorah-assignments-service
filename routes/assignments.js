@@ -65,7 +65,7 @@ const { publishJob } = require('../services/jobQueue');
 const { sendPush } = require('../services/push');
 const { isEligibleForClassAssignment } = require('../services/assignmentEligibility');
 const { resolveClassRecipients } = require('../services/assignmentRecipients');
-const { assignmentAssignedEvent, createNotificationEvent, clearNotificationsForEntity } = require('../services/notify');
+const { assignmentAssignedEvent, assignmentFeedbackEvent, createNotificationEvent, clearNotificationsForEntity } = require('../services/notify');
 
 // After a successful submit/complete (every 2xx is sent after the submission is saved),
 // clear the student's now-stale "new assignment" notifications.
@@ -3144,8 +3144,12 @@ router.put('/:id/teacher-feedback', async (req, res) => {
     // Merge teacher feedback into ai_feedback JSON
     let feedbackObj = {};
     try { feedbackObj = JSON.parse(sub?.ai_feedback || '{}'); } catch { feedbackObj = { text: sub?.ai_feedback || '' }; }
+    const previous = feedbackObj.teacherFeedback || '';
+    const isEdit = !!previous;
+    const now = new Date().toISOString();
     feedbackObj.teacherFeedback = feedback;
-    feedbackObj.teacherFeedbackAt = new Date().toISOString();
+    if (isEdit) feedbackObj.teacherFeedbackEditedAt = now;
+    else feedbackObj.teacherFeedbackAt = now;
 
     const { error } = await supabase
       .from('assignment_submissions')
@@ -3154,6 +3158,17 @@ router.put('/:id/teacher-feedback', async (req, res) => {
       .eq('student_id', userId);
 
     if (error) return res.status(500).json({ error: error.message });
+
+    // Bell notification for the student + parents; each send/edit is its own event.
+    if (String(previous).trim() !== String(feedback).trim()) {
+      const { data: assignment } = await supabase
+        .from('assignments').select('id, title, subject, type').eq('id', id).maybeSingle();
+      await createNotificationEvent(assignmentFeedbackEvent(assignment || { id }, {
+        studentId: userId, feedback, version: now, edited: isEdit,
+        actorEmail: req.body.teacherEmail ? String(req.body.teacherEmail).toLowerCase() : null,
+      }));
+    }
+
     res.json({ ok: true, feedback: feedbackObj });
   } catch (err) {
     res.status(500).json({ error: err.message });
