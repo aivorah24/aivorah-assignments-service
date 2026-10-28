@@ -129,7 +129,7 @@ describe('POST /quiz/generate-image — OCR + Groq-structuring fallback when Gem
   test('a real daily-quota Gemini failure falls back to OCR (Tesseract, real - no Qwen/network needed) + Groq structuring, which succeeds', async () => {
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
     global.fetch = jest.fn().mockRejectedValue(new Error('should not be reached - Tesseract should succeed first'));
-    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From OCR Text', tasks: [] }) } }] });
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From OCR Text', tasks: [{ title: 'T1', questions: [{ type: 'short', question: 'Q1?', answer: 'A' }] }] }) } }] });
 
     const res = await request(app)
       .post('/quiz/generate-image')
@@ -147,7 +147,7 @@ describe('POST /quiz/generate-image — OCR + Groq-structuring fallback when Gem
       ok: true,
       json: async () => ({ choices: [{ message: { content: 'Task 1: Solve.\na) 2 + 2 = ___' } }] }),
     });
-    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From Qwen Fallback', tasks: [] }) } }] });
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From Qwen Fallback', tasks: [{ title: 'T1', questions: [{ type: 'short', question: 'Q1?', answer: 'A' }] }] }) } }] });
 
     // A garbage (non-decodable) buffer makes Tesseract throw via the
     // format guard, exercising the fallback-to-Qwen path.

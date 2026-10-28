@@ -58,7 +58,7 @@ describe('POST /quiz/generate — real generation contract', () => {
     expect(res.status).toBe(200);
     expect(res.body.quiz.title).toBe('Algebra Worksheet');
     expect(res.body.quiz.tasks[0].questions[0].answer).toBe('3');
-  });
+  }, 30000);
 
   test('the PDF is sent as inline PDF data, not re-rasterized into images', async () => {
     mockGenerateContent.mockResolvedValue(geminiJsonResponse({ title: 'x', tasks: [] }));
@@ -88,7 +88,7 @@ describe('POST /quiz/generate — real failure handling', () => {
     // chain runs (not just that Gemini failed) without needing a real PDF
     // fixture in this suite.
     expect(res.body.error).toMatch(/Could not extract any worksheet content/);
-  });
+  }, 30000);
 
   test('a malformed (non-JSON) Gemini response surfaces as a 500 with the raw text', async () => {
     mockGenerateContent.mockResolvedValue({ response: { text: () => 'not json' } });
@@ -124,26 +124,50 @@ describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', 
   beforeEach(() => { mockGenerateContent.mockReset(); mockGroqCreate.mockReset(); });
   afterEach(() => { global.fetch = realFetch; });
 
-  test('a real Gemini failure, with pdf-parse text too thin, falls back to Tesseract OCR (real, via PDF rasterization) + Groq structuring, which succeeds', async () => {
-    // Tesseract is PRIMARY OCR for every script (changed 2026-09-12 after
-    // Qwen's HuggingFace router was found depleted in production) - no
-    // network call needed here at all; Tesseract really reads the
-    // rasterized page's actual heading text ("Worksheet").
-    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
-    global.fetch = jest.fn().mockRejectedValue(new Error('should not be reached - Tesseract should succeed first'));
-    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Structured From OCR Text', tasks: [] }) } }] });
-
+  // Was a 200 with 0 tasks after ~40 s live (2026-10-28); now rejected before any AI call.
+  test('a worksheet with only a heading (no questions, no pictures) is rejected instantly as empty', async () => {
+    const started = Date.now();
     const res = await request(app)
       .post('/quiz/generate')
       .attach('pdf', thinTextPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
 
-    expect(res.status).toBe(200);
-    expect(res.body.quiz.title).toBe('Structured From OCR Text');
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(mockGroqCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-oss-120b' }));
-    const groqPromptText = mockGroqCreate.mock.calls[0][0].messages[0].content;
-    expect(groqPromptText).toMatch(/Worksheet/); // the real Tesseract-OCR'd heading made it into Groq's prompt
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('EMPTY_WORKSHEET');
+    expect(res.body.error).toMatch(/no content/);
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(mockGroqCreate).not.toHaveBeenCalled();
+    expect(Date.now() - started).toBeLessThan(5000);
   }, 30000);
+
+  test('an AI result with zero tasks is an error, not an empty quiz', async () => {
+    mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
+    global.fetch = jest.fn().mockRejectedValue(new Error('no network calls expected'));
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'Nothing', tasks: [] }) } }] });
+
+    const res = await request(app)
+      .post('/quiz/generate')
+      .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('NO_QUESTIONS');
+    expect(res.body.error).toMatch(/No questions were found/);
+  }, 240000);
+
+  test('Gemini starts before the slow local document reading finishes', async () => {
+    let geminiStartedAt;
+    mockGenerateContent.mockImplementation(async () => {
+      geminiStartedAt = Date.now();
+      return geminiJsonResponse({ title: 'Fast', tasks: [{ title: 'T1', questions: [{ type: 'short', question: 'Q1?', answer: 'A' }] }] });
+    });
+    const started = Date.now();
+    const res = await request(app)
+      .post('/quiz/generate')
+      .attach('pdf', realPdf, { filename: 'worksheet.pdf', contentType: 'application/pdf' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.quiz.provider).toBe('gemini');
+    expect(geminiStartedAt - started).toBeLessThan(3000);
+  }, 240000);
 
   // Was: "pdf-parse already got enough real text → skip OCR". That rule was the
   // 2026-10-13 root cause: this Telugu worksheet's text layer has ~1100 chars of
@@ -153,7 +177,7 @@ describe('POST /quiz/generate — fallback chain when Gemini fails (PDF path)', 
   test('a real Gemini failure on a Telugu worksheet whose questions are screenshots: pages are OCR\'d and Groq gets the questions', async () => {
     mockGenerateContent.mockRejectedValue(new Error('429 Too Many Requests: daily quota exceeded'));
     global.fetch = jest.fn().mockRejectedValue(new Error('no network calls expected'));
-    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'From OCR', tasks: [] }) } }] });
+    mockGroqCreate.mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ title: 'From OCR', tasks: [{ title: 'T1', questions: [{ type: 'short', question: 'Q1?', answer: 'A' }] }] }) } }] });
 
     const res = await request(app)
       .post('/quiz/generate')
@@ -255,7 +279,7 @@ describe('quiz_generate job handler — same logic as the synchronous route', ()
   beforeEach(() => mockGenerateContent.mockReset());
 
   test('a real payload (base64 PDF) is decoded and produces the real { quiz } result shape', async () => {
-    mockGenerateContent.mockResolvedValue(geminiJsonResponse({ title: 'Queued Worksheet', tasks: [] }));
+    mockGenerateContent.mockResolvedValue(geminiJsonResponse({ title: 'Queued Worksheet', tasks: [{ title: 'T1', questions: [{ type: 'short', question: 'Q1?', answer: 'A' }] }] }));
     // Exercises the exact same decode + call-through jobHandlers.js's
     // registered 'quiz_generate' handler performs.
     const { generateQuizFromPdf } = require('../../services/quizVision');

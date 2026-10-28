@@ -278,7 +278,11 @@ async function safe(label, fn, fallback) {
  * @param {string[]} [input.hints]     language/subject hints ("Telugu", "te", "Language Acquisition-Hindi")
  * @param {(imgs: object[]) => Promise<{url?: string}[]>} [input.hostImages]  uploads pictures, same order
  */
-async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [], hostImages, maxPages = 12, ocrEnabled = true } = {}) {
+// Pages rendered + OCR'd per upload. 6 pages OOM-killed Render's 512 MB box (2026-10-28);
+// Gemini still reads the whole PDF, this only limits the local OCR path.
+const DOCUMENT_MAX_PAGES = Math.max(1, parseInt(process.env.DOCUMENT_MAX_PAGES || '3', 10) || 3);
+
+async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [], hostImages, maxPages = DOCUMENT_MAX_PAGES, ocrEnabled = true } = {}) {
   const started = Date.now();
   const isPdf = /pdf/i.test(mime || '') || buffer.slice(0, 5).toString('latin1') === '%PDF-';
   const diagnostics = { kind: isPdf ? (structuredText ? 'docx' : 'pdf') : 'image', pages: [], warnings: [] };
@@ -445,4 +449,4 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
   };
 }
 
-module.exports = { buildDocumentModel, pairFractions, readingOrder, assessTextLayer, cleanLine, composeRows, classifyImage, isTextImage, isDecorative, coveredBy, makeCorpus, tokensOf };
+module.exports = { buildDocumentModel, DOCUMENT_MAX_PAGES, pairFractions, readingOrder, assessTextLayer, cleanLine, composeRows, classifyImage, isTextImage, isDecorative, coveredBy, makeCorpus, tokensOf };

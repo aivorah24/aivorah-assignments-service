@@ -170,7 +170,7 @@ router.post('/generate-image', upload.single('image'), async (req, res) => {
     if (err.message === 'AI returned invalid JSON') {
       return res.status(500).json({ error: err.message, raw: err.raw });
     }
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
   }
 });
 
@@ -190,7 +190,7 @@ router.post('/generate', upload.single('pdf'), async (req, res) => {
     if (err.message === 'AI returned invalid JSON') {
       return res.status(500).json({ error: err.message, raw: err.raw });
     }
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message, code: err.code });
   }
 });
 
