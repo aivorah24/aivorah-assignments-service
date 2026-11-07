@@ -6,7 +6,8 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
-app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'aivorah-assignments-service' }));
+// commit: the deployed git commit (Render sets RENDER_GIT_COMMIT), to check what is live.
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'aivorah-assignments-service', commit: (process.env.RENDER_GIT_COMMIT || '').slice(0, 7) || null }));
 
 // The teacher's private library: mounted before /assignments (its own sign-in check).
 app.use('/assignments/library', require('./routes/library'));
