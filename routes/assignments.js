@@ -52,6 +52,7 @@
  * verbatim rather than split, to avoid the two copies drifting apart.
  */
 const express    = require('express');
+const { saveToLibrary } = require('../services/teacherLibrary');
 const router     = express.Router();
 const supabase   = require('../services/supabase');
 const Groq       = require('groq-sdk');
@@ -1302,6 +1303,12 @@ router.post('/', async (req, res) => {
       .single();
 
     if (error) return res.status(500).json({ error: error.message });
+
+    // Keep a copy in the teacher's private library so it can be assigned again
+    // later (services/teacherLibrary.js). Never blocks or fails the create.
+    if (createdByRole === 'teacher' && creatorId) {
+      await saveToLibrary({ teacherId: creatorId, body: req.body, assignment: data });
+    }
 
     // Notification V2 (runs alongside the legacy push + parent messages below).
     try {
