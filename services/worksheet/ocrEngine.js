@@ -162,14 +162,16 @@ async function detectScript(imageBuffer) {
 
 // Full OCR with line boxes. `langs` like ['tel', 'eng']; `sparse` reads
 // scattered words (labels around pictures) instead of text blocks; `digits`
-// reads only digits (lone "8"s in stacked fractions are otherwise missed).
-async function ocrImage(imageBuffer, langs = ['eng'], { sparse = false, digits = false } = {}) {
+// reads only digits (lone "8"s in stacked fractions are otherwise missed);
+// `line` reads one short line (a value cut out of a circle); `chars` limits
+// the characters read.
+async function ocrImage(imageBuffer, langs = ['eng'], { sparse = false, digits = false, line = false, chars = '' } = {}) {
   if (!isDecodableImage(imageBuffer)) throw new Error('OCR: input is not a decodable image');
   return serial(async () => {
     const worker = await getWorker(langs);
     await worker.setParameters({
-      tessedit_pageseg_mode: sparse ? '11' : '6', // 6 = the library default
-      tessedit_char_whitelist: digits ? '0123456789' : '',
+      tessedit_pageseg_mode: line ? '7' : sparse ? '11' : '6', // 6 = the library default
+      tessedit_char_whitelist: chars || (digits ? '0123456789' : ''),
     });
     const { data } = await worker.recognize(await prepareForOcr(imageBuffer), {}, { text: true, blocks: true });
     const lines = [];

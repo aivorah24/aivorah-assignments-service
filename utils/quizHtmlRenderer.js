@@ -1061,28 +1061,38 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       [bankWords[i], bankWords[j]] = [bankWords[j], bankWords[i]];
     }
 
-    let h = `<p style="font-size:13px;color:#A8B5B3;margin:0 0 10px;">Drag each word onto its matching picture &mdash; or tap a word, then tap a picture&rsquo;s box.</p>`;
+    // Cards show their own picture only when the items really have one each
+    // (a picture per item, as in "match the word to the picture"). Otherwise
+    // the task's picture is the QUESTION for every item - the worksheet's
+    // matching chart, a table, one uncropped strip of all the icons - so it is
+    // shown once above the cards and each card shows its item's text.
+    // (MHLE-31: the Length/Width/Area/Perimeter chart was the shared task
+    // picture; drawn inside card a) only, it looked like an answer option.)
+    const cardImgs = matchQs.map(q => q.imageUrl).filter(Boolean);
+    const distinctImgs = new Set(cardImgs);
+    const sharedUrl = task.sharedImage && questions[0] && questions[0].imageUrl;
+    let perItemPictures = distinctImgs.size >= 2 && distinctImgs.size === cardImgs.length
+      && distinctImgs.size * 2 >= matchQs.length;
+    // The task's shared picture is an item's own only if every other item has one too.
+    if (perItemPictures && sharedUrl && matchQs.slice(1).some(q => !q.imageUrl)) perItemPictures = false;
+    const sharedRefs = perItemPictures ? [] : [...new Set([sharedUrl, ...cardImgs].filter(Boolean))];
+
+    let h = perItemPictures
+      ? `<p style="font-size:13px;color:#A8B5B3;margin:0 0 10px;">Drag each word onto its matching picture &mdash; or tap a word, then tap a picture&rsquo;s box.</p>`
+      : `<p style="font-size:13px;color:#A8B5B3;margin:0 0 10px;">Drag each answer onto its matching item &mdash; or tap an answer, then tap an item&rsquo;s box.</p>`;
+    for (const url of sharedRefs) {
+      h += `<div class="match-shared-ref" style="text-align:center;margin:0 0 14px;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(url)}" alt="${esc(task.sharedImageDescription || 'Picture for this task')}" style="max-height:360px;"></div>`;
+    }
+    if (sharedRefs.length) h += `<div style="font-size:12px;color:#A8B5B3;margin:-8px 0 12px;text-align:center;">Use the picture above to match each item.</div>`;
     h += `<div class="match-bank" id="${bankId}">` + bankWords.map(w =>
       `<span class="match-chip" draggable="true" data-word="${esc(w)}" data-bank="${bankId}" ondragstart="mDragStart(event)" onclick="mChipClick(this)">${fmt(w)}</span>`).join('') + `</div>`;
-
-    // If EVERY card would show the exact same image, the diagram extractor failed
-    // to split the worksheet's picture column into individual crops and instead
-    // gave every question the one uncropped strip (all N icons stacked). Rendering
-    // that identical tall strip inside all N cards is visually broken and useless
-    // for matching. Show it ONCE as a reference above the cards instead, and leave
-    // the cards clean (they fall back to the question text as the match label).
-    const cardImgs = matchQs.map(q => q.imageUrl).filter(Boolean);
-    const allSameImage = cardImgs.length === matchQs.length && cardImgs.length >= 2 && new Set(cardImgs).size === 1;
-    if (allSameImage) {
-      h += `<div class="match-shared-ref" style="text-align:center;margin:0 0 14px;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(cardImgs[0])}" alt="Pictures to match" style="max-height:360px;"><div style="font-size:12px;color:#A8B5B3;margin-top:4px;">Match each word to the correct picture above.</div></div>`;
-    }
 
     h += `<div class="match-grid">`;
     matchQs.forEach((q, i) => {
       const qId = qIds[i];
       h += `<div class="match-card" id="${qId}-card">`;
       if (q.id) h += `<div class="match-card-label">${esc(q.id)})</div>`;
-      if (q.imageUrl && !allSameImage) {
+      if (q.imageUrl && perItemPictures) {
         h += `<div class="match-img"><img src="${embedImage(q.imageUrl)}" alt="${esc(q.diagramDescription || 'Picture to match')}" onerror="wkImgError(this)"></div>`;
       } else {
         // No cropped picture (or the only image is the shared strip shown above) —
@@ -1104,6 +1114,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
 
     // Any non-matching questions in the same task render normally below
     for (const q of rest) {
+      if (sharedRefs.includes(q.imageUrl)) q._sharedImage = true; // already shown above
       const qId = registerQuestion(q);
       h += renderQuestionCell(q, qId, false);
     }
