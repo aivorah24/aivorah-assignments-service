@@ -187,6 +187,55 @@ describe('solution formatting and explanation questions', () => {
       expect(html).toMatch(/<img class="wk-img"[^>]*shared\.png/);
     });
 
+    // MHLE-31: Task 3's matching chart (one picture for the whole task) was
+    // drawn inside card a) like an answer, the other cards showed text.
+    describe('match-the-following', () => {
+      const items = [
+        ['1) Length = 2, Width = 2', 'Area = 4, Perimeter = 8'],
+        ['2) Length = 3, Width = 4', 'Area = 12, Perimeter = 14'],
+        ['3) Length = 5, Width = 5', 'Area = 25, Perimeter = 20'],
+        ['4) Length = 7, Width = 9', 'Area = 63, Perimeter = 32'],
+      ];
+      const matchQuiz = (images, task = {}) => ({ tasks: [{
+        title: 'Task 3: Match the length and width to the area and perimeter of each shape.',
+        ...task,
+        questions: items.map(([question, answer], i) => ({ id: 'abcd'[i], question, answer, ...(images[i] ? { imageUrl: images[i] } : {}) })),
+      }] });
+      const cards = html => html.split('class="match-card"').slice(1).map(c => c.slice(0, c.indexOf('match-slot')));
+
+      test('a task picture on the first item is shown once above, as the question; every card shows its item', () => {
+        const html = renderQuizHTML(matchQuiz(['https://x.test/chart.png'], { sharedImage: true }), {});
+        expect(html.match(/x\.test\/chart\.png/g)).toHaveLength(1);
+        expect(html.indexOf('class="match-shared-ref"')).toBeLessThan(html.indexOf('class="match-bank"'));
+        const c = cards(html);
+        expect(c).toHaveLength(4);
+        c.forEach((card, i) => {
+          expect(card).not.toContain('<img');
+          expect(card).toContain(items[i][0].slice(0, 2));
+        });
+        expect(html).toContain('Drag each answer onto its matching item');
+      });
+
+      test('one picture on one item is not that item\'s picture either, even without sharedImage', () => {
+        const html = renderQuizHTML(matchQuiz(['https://x.test/chart.png']), {});
+        expect(cards(html).some(card => card.includes('<img'))).toBe(false);
+        expect(html.match(/x\.test\/chart\.png/g)).toHaveLength(1);
+      });
+
+      test('a picture per item stays in its card (match the word to the picture)', () => {
+        const pics = ['a', 'b', 'c', 'd'].map(n => `https://x.test/${n}.png`);
+        const html = renderQuizHTML(matchQuiz(pics), {});
+        cards(html).forEach((card, i) => expect(card).toContain(pics[i]));
+        expect(html).not.toContain('class="match-shared-ref"');
+        expect(html).toContain('Drag each word onto its matching picture');
+      });
+
+      test('the same strip on every item is shown once above', () => {
+        const html = renderQuizHTML(matchQuiz(Array(4).fill('https://x.test/strip.png')), {});
+        expect(html.match(/x\.test\/strip\.png/g)).toHaveLength(1);
+      });
+    });
+
     test('a picture that fails to load is replaced by a note (handler defined in <head>)', () => {
       const html = renderQuizHTML(quizWith({ imageUrl: '/data/images/quiz/gone.png' }), {});
       const head = html.slice(0, html.indexOf('</head>'));

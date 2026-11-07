@@ -43,6 +43,30 @@ describe('findGridCells', () => {
   });
 });
 
+describe('findRingLabels (values printed inside circles)', () => {
+  const { findRingLabels } = require('../../services/worksheet/pngImage');
+  const ink = (img, x, y) => img.setPixelColor(0x000000ff, Math.round(x), Math.round(y));
+  const oval = (img, cx, cy, rx, ry) => {
+    for (let t = 0; t < 2 * Math.PI; t += 0.005) for (let k = 0; k < 2; k++) ink(img, cx + (rx - k) * Math.cos(t), cy + (ry - k) * Math.sin(t));
+  };
+  const block = (img, x0, y0, x1, y1) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) ink(img, x, y); };
+
+  test('a ring holding a value is found and its inside returned clean; empty bubbles, dots and lines are not', () => {
+    const img = new Jimp({ width: 400, height: 120, color: 0xffffffff });
+    oval(img, 60, 60, 32, 18); block(img, 55, 52, 58, 68);      // "(1)"
+    oval(img, 160, 60, 32, 18);                                 // empty answer bubble
+    block(img, 240, 50, 260, 70);                               // filled dot
+    block(img, 290, 59, 390, 60);                               // a line
+    const rings = findRingLabels(img);
+    expect(rings).toHaveLength(1);
+    expect(rings[0].box.x).toBeLessThan(40);
+    const { width, height, data } = rings[0].image.bitmap;
+    let black = 0;
+    for (let i = 0; i < width * height; i++) if (data[i * 4] === 0) black++;
+    expect(black).toBe(4 * 17); // just the mark, no ring
+  });
+});
+
 describe('resolvePictureRefs', () => {
   const doc = { pictures: [
     { id: 'img://p1-1', url: 'https://cdn.test/a.png', buffer: Buffer.from('a'), mime: 'image/png' },

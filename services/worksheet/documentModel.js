@@ -194,7 +194,7 @@ const boxOf = w => ({ x: w.bbox.x0, y: w.bbox.y0, w: w.bbox.x1 - w.bbox.x0, h: w
 // pair a number with the one directly below it into "28/50". Without this a
 // text-only model sees "28 50 8 24 …" and guesses the fractions.
 function pairFractions(words) {
-  const items = words.map(w => ({ text: w.text, box: boxOf(w) }));
+  const items = words.map(w => ({ text: w.text, box: boxOf(w), ring: !!w.ring }));
   const isNum = t => /^\d+$/.test(t);
   const used = new Set();
   const out = [];
@@ -202,10 +202,10 @@ function pairFractions(words) {
   for (const i of byTop) {
     if (used.has(i)) continue;
     const a = items[i];
-    if (isNum(a.text)) {
+    if (isNum(a.text) && !a.ring) {
       let best = -1; let bestGap = Infinity;
       items.forEach((b, j) => {
-        if (j === i || used.has(j) || !isNum(b.text)) return;
+        if (j === i || used.has(j) || !isNum(b.text) || b.ring) return; // circled values are not fractions
         const gap = b.box.y - (a.box.y + a.box.h);
         const cxA = a.box.x + a.box.w / 2; const cxB = b.box.x + b.box.w / 2;
         if (b.box.y > a.box.y + a.box.h * 0.5 && gap < a.box.h * 1.6 && Math.abs(cxA - cxB) < Math.max(a.box.w, b.box.w) * 0.8 && gap < bestGap) {
@@ -269,7 +269,29 @@ async function readRegionWords(src, langs) {
     const res = await ocr.ocrImage(pngBuffer(big), ['eng'], { digits: true });
     merge(labelWords(res).map(w => ({ ...w, bbox: { x0: w.bbox.x0 / 2, y0: w.bbox.y0 / 2, x1: w.bbox.x1 / 2, y1: w.bbox.y1 / 2 } })));
   }
+  // Values printed inside circles: read one by one, replacing whatever the
+  // passes above guessed from the ring.
+  for (const w of await readRingWords(jimpFromPng(src))) {
+    const ring = { bbox: w.bbox };
+    for (let i = words.length - 1; i >= 0; i--) if (overlaps(words[i], ring)) words.splice(i, 1);
+    words.push(w);
+  }
   return words;
+}
+
+const RING_CHARS = '0123456789/.,-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+async function readRingWords(img) {
+  const { findRingLabels, pngBuffer } = require('./pngImage');
+  const out = [];
+  for (const r of findRingLabels(img)) {
+    // Glyphs come trimmed with a white margin; Tesseract reads best at ~64px.
+    r.image.scale(Math.max(1, 64 / r.image.bitmap.height));
+    const res = await ocr.ocrImage(pngBuffer(r.image), ['eng'], { line: true, chars: RING_CHARS });
+    const text = res.lines.map(l => l.text).join(' ').replace(/\s+/g, '').trim();
+    if (!text || text.length > 6 || res.confidence < 50) continue;
+    out.push({ text, confidence: res.confidence, ring: true, bbox: { x0: r.box.x, y0: r.box.y, x1: r.box.x + r.box.w, y1: r.box.y + r.box.h } });
+  }
+  return out;
 }
 
 // Words printed inside a picture, in reading order with stacked fractions

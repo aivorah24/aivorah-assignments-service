@@ -99,6 +99,27 @@ describe('fractions printed as pictures (MHLE-29: teacher saw invented values)',
   });
 });
 
+describe('values printed inside circles (MHLE-31: match-the-columns chart)', () => {
+  // Task 3 is one picture: Length / Width / Area / Perimeter columns of
+  // circled numbers. OCR used to read only the headings, so a text-only model
+  // had to guess every value.
+  let doc;
+  beforeAll(async () => {
+    doc = await buildDocumentModel({ buffer: fixture('b07-area-perimeter-matching-worksheet.pdf'), mime: 'application/pdf', hostImages: fakeHost });
+  }, 180000);
+
+  test('every circled value is read, row by row, without being paired into fractions', () => {
+    const chart = doc.pictures.find(p => /Length/i.test(p.labels));
+    expect(chart).toBeDefined();
+    expect(chart.labels).toMatch(/Length width Area Perimeter ; 2 5 4 14 ; 3 2 25 8 ; 5 9 63 20 ; 7 4 12 32/i);
+    expect(chart.labels).not.toMatch(/\d\/\d/);
+  });
+
+  test('the chart is placed under Task 3 in the transcript', () => {
+    expect(doc.text).toMatch(/Task 3: Match the length[\s\S]*?\[IMAGE: url=img:\/\/p2-\d+\] \(text in picture: Length/);
+  });
+});
+
 describe('degrades instead of failing', () => {
   test('an unparseable PDF yields an empty model without launching Chrome', async () => {
     const doc = await buildDocumentModel({ buffer: Buffer.from('%PDF-fake'), mime: 'application/pdf' });
