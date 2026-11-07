@@ -69,6 +69,16 @@ Runs on `PORT` (default `3015`).
   for a question the student got wrong.
 - `POST /assignments/validate-fill-blank` — fuzzy-tolerant fill-blank
   answer validation (exact/numeric/decimal-equivalence/Levenshtein).
+- `GET /assignments/library`, `GET /assignments/library/:id`,
+  `DELETE /assignments/library/:id` — the signed-in teacher's **private
+  assignment library** (table `teacher_assignment_library`, aivorah-db 0021).
+  Every assignment a teacher creates via `POST /assignments` is kept there
+  (one row per distinct content; the same content again bumps
+  `times_assigned`). To assign an item again, the app POSTs its `content` to
+  `/assignments` with a new `dueDate` / `studentId`. These routes need
+  `Authorization: Bearer <Firebase ID token>`; the teacher is taken from the
+  token, never from the request. Requires `FIREBASE_SERVICE_ACCOUNT_B64`
+  (same value as the other services).
 - `GET /health`
 
 ## Branching

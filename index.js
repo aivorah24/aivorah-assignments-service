@@ -8,6 +8,8 @@ app.use(express.json({ limit: '20mb' }));
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'aivorah-assignments-service' }));
 
+// The teacher's private library: mounted before /assignments (its own sign-in check).
+app.use('/assignments/library', require('./routes/library'));
 app.use('/assignments', require('./routes/assignments'));
 app.use('/curriculum', require('./routes/curriculum'));
 app.use('/jobs', require('./routes/jobs'));
