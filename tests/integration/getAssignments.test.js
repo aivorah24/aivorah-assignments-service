@@ -265,3 +265,27 @@ describe('GET /assignments — deny by default (no owner / no audience means not
     expect(res.body.map(a => a.id)).not.toContain('g9');
   });
 });
+
+describe('GET /assignments — student list speed', () => {
+  test('the profile, assignments, teacher links and submissions are requested together, before the creator lookup', async () => {
+    mockSb.setTable('users', [
+      { data: usersRow({ curriculum: 'IB PYP', grade: 'Grade 4' }), error: null },
+      { data: [{ id: TEACHER_UUID, school: null }], error: null },
+    ]);
+    mockSb.setTable('assignments', {
+      data: [assignmentRow({ id: 'a2', student_id: null, created_by_id: TEACHER_UUID, curriculum: 'IB PYP', grade: 'Grade 4' })],
+      error: null,
+    });
+    mockSb.setTable('teacher_student', { data: [{ teacher_id: TEACHER_UUID }], error: null });
+    mockSb.setTable('assignment_submissions', { data: [{ assignment_id: 'a2', status: 'completed', score: 80 }], error: null });
+    mockSb.supabase.from.mockClear();
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(200);
+    const tables = mockSb.supabase.from.mock.calls.map(c => c[0]);
+    expect(tables.slice(0, 4)).toEqual(['users', 'assignments', 'teacher_student', 'assignment_submissions']);
+    // The student's own score still comes through on the class-wide assignment.
+    expect(res.body.find(a => a.id === 'a2').score).toBe(80);
+  });
+});

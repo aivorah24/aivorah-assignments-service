@@ -1515,44 +1515,50 @@ router.get('/', async (req, res) => {
   const userId = await resolveUserId(studentId);
   if (!userId) return res.json([]);
 
-  // Fetch student's curriculum, grade, school, and join date for filtering
-  let studentCurriculum = null;
-  let studentGrade = null;
-  let studentSchool = null;
-  let studentJoinedAt = null;
-  let studentKnown = false;
-  if (userId) {
-    const { data: uData } = await supabase.from('users').select('curriculum, grade, school, created_at').eq('id', userId).single();
-    studentKnown = !!uData;
-    studentCurriculum = uData?.curriculum || null;
-    studentGrade = uData?.grade || null;
-    studentSchool = uData?.school || null;
-    studentJoinedAt = uData?.created_at || null;
-  }
-
-  // Fetch all assignments for this student (personal) OR class-wide (student_id is null)
+  // These four lookups only need userId, so they run at the same time: each
+  // Supabase round trip from Render costs ~0.25-0.6s, and running the whole
+  // chain one after another made this list take ~3s to load.
+  //  - the student's curriculum, grade, school, and join date (for filtering)
+  //  - all assignments for this student (personal) OR class-wide (student_id is null)
+  //  - which teachers this student is linked to: a teacher's "All students"
+  //    assignment must only reach the students under that teacher — not every
+  //    student in the curriculum+grade across the whole school
+  //  - this student's submissions, so each assignment shows their own score
   const orFilter = userId
     ? `student_id.eq.${userId},student_id.is.null`
     : `student_id.is.null`;
-  const { data: allData, error } = await supabase
-    .from('assignments')
-    .select('*')
-    .or(orFilter)
-    .order('due_date', { ascending: true });
+  const [
+    { data: uData },
+    { data: allData, error },
+    { data: tlinks },
+    { data: subs },
+  ] = await Promise.all([
+    supabase.from('users').select('curriculum, grade, school, created_at').eq('id', userId).single(),
+    supabase
+      .from('assignments')
+      .select('*')
+      .or(orFilter)
+      .order('due_date', { ascending: true }),
+    supabase
+      .from('teacher_student')
+      .select('teacher_id')
+      .eq('student_id', userId),
+    supabase
+      .from('assignment_submissions')
+      .select('assignment_id, status, score, ai_feedback, submission_text, completed_at')
+      .eq('student_id', userId),
+  ]);
+
+  const studentKnown = !!uData;
+  const studentCurriculum = uData?.curriculum || null;
+  const studentGrade = uData?.grade || null;
+  const studentSchool = uData?.school || null;
+  const studentJoinedAt = uData?.created_at || null;
 
   if (error) return res.status(500).json({ error: error.message });
 
-  // Which teachers is this student linked to? A teacher's "All students" assignment
-  // must only reach the students under that teacher — not every student in the
-  // curriculum+grade across the whole school.
   const studentTeacherIds = new Set();
-  if (userId) {
-    const { data: tlinks } = await supabase
-      .from('teacher_student')
-      .select('teacher_id')
-      .eq('student_id', userId);
-    (tlinks || []).forEach(l => { if (l.teacher_id) studentTeacherIds.add(l.teacher_id); });
-  }
+  (tlinks || []).forEach(l => { if (l.teacher_id) studentTeacherIds.add(l.teacher_id); });
 
   // School scoping: a class-wide assignment must not cross schools. Look up the
   // school of each class-wide assignment's creator so we can require it to match
@@ -1560,6 +1566,10 @@ router.get('/', async (req, res) => {
   const classCreatorIds = [...new Set(
     (allData || []).filter(a => a.student_id === null && a.created_by_id).map(a => a.created_by_id)
   )];
+  // Fetched once per request (not per assignment) so the school/curriculum logo
+  // shows on every regenerated worksheet — see normalise()'s live HTML regen.
+  // Runs alongside the creator-school lookup (neither needs the other).
+  const brandingReq = fetchBranding(studentSchool, studentCurriculum);
   const creatorSchoolMap = {};
   if (classCreatorIds.length > 0) {
     const { data: creators } = await supabase.from('users').select('id, school').in('id', classCreatorIds);
@@ -1577,21 +1587,11 @@ router.get('/', async (req, res) => {
     });
   });
 
-  // Fetch this student's submissions so each assignment shows their own score
-  let submissionsMap = {};
-  if (userId && filtered.length > 0) {
-    const assignmentIds = filtered.map(a => a.id);
-    const { data: subs } = await supabase
-      .from('assignment_submissions')
-      .select('assignment_id, status, score, ai_feedback, submission_text, completed_at')
-      .eq('student_id', userId)
-      .in('assignment_id', assignmentIds);
-    (subs || []).forEach(s => { submissionsMap[s.assignment_id] = s; });
-  }
+  // This student's submissions (fetched above), keyed by assignment.
+  const submissionsMap = {};
+  (subs || []).forEach(s => { submissionsMap[s.assignment_id] = s; });
 
-  // Fetched once per request (not per assignment) so the school/curriculum logo
-  // shows on every regenerated worksheet — see normalise()'s live HTML regen.
-  const branding = await fetchBranding(studentSchool, studentCurriculum);
+  const branding = await brandingReq;
 
   const result = filtered.map(a => {
     const norm = normaliseWithSubmission(a, submissionsMap[a.id], branding);
