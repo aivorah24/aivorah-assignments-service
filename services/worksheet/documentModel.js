@@ -6,13 +6,15 @@
 //     pasted screenshots),
 //   - every real picture hosted and placed INLINE as [IMAGE: url=...] at its
 //     position (a picture beside a word stays on that word's row, so matching
-//     tasks keep their pairs),
+//     tasks keep their pairs) - embedded pictures AND diagrams drawn as shapes
+//     (vectorFigures.js), which are cut from the page render,
 //   - page images for vision models.
 // Every AI provider (vision or text-only) is then given this transcript as
 // ground truth, so a worksheet converts the same way whichever provider is up.
 const { readPdfLayout } = require('./pdfLayout');
 const { rasterizePdfPages } = require('./rasterize');
 const ocr = require('./ocrEngine');
+const { findVectorFigures } = require('./vectorFigures');
 
 const INDIC_OR_RTL = /[ऀ-෿؀-ۿ]/;
 const COMBINING_MARK = /\p{M}/u;
@@ -86,6 +88,34 @@ function overlapRatio(l, b) {
 }
 
 // Logo / header strip / thin rule — not worksheet content.
+// Drawn diagrams on a page (vectorFigures.js), cut from the page render so
+// they travel like embedded pictures. Their labels ("5 m", "A", "60°") come
+// from the text layer and stay with the figure.
+async function cutVectorFigures(lp, raster) {
+  if (!raster || !lp.width || !(lp.drawings || []).length) return [];
+  const figures = findVectorFigures(lp);
+  if (!figures.length) return [];
+  const { jimpFromPng, pngBuffer } = require('./pngImage');
+  const page = jimpFromPng(raster.buffer);
+  const k = page.bitmap.width / lp.width;
+  const pageArea = lp.width * lp.height || 1;
+  const out = [];
+  for (const f of figures) {
+    const x = Math.max(0, Math.floor(f.bbox.x * k));
+    const y = Math.max(0, Math.floor(f.bbox.y * k));
+    const w = Math.min(page.bitmap.width - x, Math.ceil(f.bbox.w * k));
+    const h = Math.min(page.bitmap.height - y, Math.ceil(f.bbox.h * k));
+    if (w < 8 || h < 8) continue;
+    const buffer = pngBuffer(page.clone().crop({ x, y, w, h }));
+    out.push({
+      buffer, ocrBuffer: buffer, mime: 'image/png', width: w, height: h, page: lp.page,
+      bbox: f.bbox, areaRatio: (f.bbox.w * f.bbox.h) / pageArea,
+      kind: 'picture', vector: true, labels: f.labels, labelBoxes: f.labelBoxes,
+    });
+  }
+  return out;
+}
+
 function isDecorative(img, page) {
   const { bbox } = img;
   if (img.repeat) return true;
@@ -369,12 +399,20 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     // page render) and attached to its marker, not left as loose lines.
     textItems = textItems.filter(t => t.origin !== 'ocr' || !labelPictures.some(img => overlapRatio(t, img.bbox) >= 0.7));
     contentImages.forEach((img, k) => { img.kind = decisions[k].kind; });
+    // Diagrams drawn as shapes (no embedded picture to find): cut from the
+    // render. Their label rows go into the picture marker, not loose lines.
+    const drawn = await safe(`vector figures page ${lp.page}`, () => cutVectorFigures(lp, raster), []);
+    if (drawn.length) {
+      textItems = textItems.filter(t => !drawn.some(f => overlapRatio(t, f.bbox) >= 0.8
+        && (t.origin === 'ocr' || f.labelBoxes.some(b => b.text === t.text))));
+      pagePictures.push(...drawn);
+    }
     for (const img of pagePictures) pictures.push(img);
     pages.push({ page: lp.page, width: lp.width, height: lp.height, source, assessment, ocrConfidence: ocrResult ? ocrResult.confidence : null, textItems, pagePictures, raster });
     diagnostics.pages.push({
       page: lp.page, source, textLayerReliable: assessment.reliable, textLayerScripts: assessment.scripts,
       ocrConfidence: ocrResult ? ocrResult.confidence : null, lines: textItems.length,
-      images: lp.images.length, pictures: pagePictures.length,
+      images: lp.images.length, pictures: pagePictures.length, drawnFigures: drawn.length,
       textImages: contentImages.length - pagePictures.length,
       decorative: lp.images.length - contentImages.length,
       imageDecisions: decisions.map((d, k) => ({
@@ -388,7 +426,8 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
   // ── Read labels inside pictures (axis values, "5m", names under photos) ──
   if (ocrEnabled && pictures.length <= MAX_PICTURES_TO_READ) {
     for (const img of pictures) {
-      if (img.kind === 'picture') img.labels = await safe('picture labels', () => readPictureLabels(img, langs), '');
+      // Drawn figures already carry their labels from the text layer.
+      if (img.kind === 'picture' && !img.vector) img.labels = await safe('picture labels', () => readPictureLabels(img, langs), '');
     }
   }
 
@@ -438,7 +477,7 @@ async function buildDocumentModel({ buffer, mime, structuredText = '', hints = [
     scripts: [...scripts],
     pictures: pictures.map(p => ({
       id: p.id, url: p.url, page: p.page, bbox: p.bbox, width: p.width, height: p.height,
-      labels: p.labels || '', buffer: p.buffer, mime: p.mime,
+      labels: p.labels || '', buffer: p.buffer, mime: p.mime, vector: !!p.vector,
     })),
     pageImages: rasters.map(r => ({ page: r.page, buffer: r.buffer, mime: 'image/png' })),
     diagnostics,
