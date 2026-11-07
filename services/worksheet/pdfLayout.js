@@ -1,13 +1,16 @@
-// One pdfjs pass over a PDF: per page, the text-layer lines and the embedded
-// pictures, both with positions (top-left origin, PDF points at scale 1), so
-// pictures can be placed next to the text they belong to.
+// One pdfjs pass over a PDF: per page, the text-layer lines, the embedded
+// pictures and the drawn shapes (vector paths), all with positions (top-left
+// origin, PDF points at scale 1), so pictures can be placed next to the text
+// they belong to. Drawn shapes are how most maths diagrams are made (Word
+// shapes, geometry figures, number lines): vectorFigures.js groups them into
+// figures, which are then cut from the page render like any other picture.
 //
 // pdfjs (not pdf-lib) because real worksheets are often encrypted
 // (permissions-only), keep images inside Form XObjects, or use PNG predictors /
 // SMask alpha / ICC colour — pdfjs decodes all of these.
 const crypto = require('crypto');
 
-const DEFAULTS = { maxPages: 12, minDimension: 40, maxImages: 40, maxSide: 1600 };
+const DEFAULTS = { maxPages: 12, minDimension: 40, maxImages: 40, maxSide: 1600, maxDrawings: 1500 };
 
 function mul(m, n) {
   return [
@@ -72,8 +75,57 @@ function itemsToLines(items, viewport) {
   }).filter(l => l.text).sort((a, b) => a.y - b.y || a.x - b.x);
 }
 
+// Coordinates each sub-path operator takes (pdfjs constructPath encoding).
+function pathShape(pdfjs, subOps, coords) {
+  const O = pdfjs.OPS;
+  const n = { [O.moveTo]: 2, [O.lineTo]: 2, [O.curveTo]: 6, [O.curveTo2]: 4, [O.curveTo3]: 4, [O.rectangle]: 4, [O.closePath]: 0 };
+  let k = 0;
+  let segs = 0;
+  let curves = false;
+  let diagonal = false;
+  let onlyRects = subOps.length > 0;
+  let cx = 0; let cy = 0;
+  let x0 = Infinity; let y0 = Infinity; let x1 = -Infinity; let y1 = -Infinity;
+  const points = [];
+  const take = (x, y) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    points.push([x, y]);
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+  };
+  for (const op of subOps) {
+    const c = n[op] || 0;
+    if (op === O.rectangle) { take(coords[k], coords[k + 1]); take(coords[k] + coords[k + 2], coords[k + 1] + coords[k + 3]); }
+    else for (let j = 0; j + 1 < c; j += 2) take(coords[k + j], coords[k + j + 1]);
+    if (op === O.lineTo) {
+      const x = coords[k]; const y = coords[k + 1];
+      const dx = Math.abs(x - cx); const dy = Math.abs(y - cy);
+      if (dx > 0.5 && dy > 0.5 && Math.min(dx, dy) / Math.max(dx, dy) > 0.05) diagonal = true;
+      segs++; cx = x; cy = y;
+    } else if (op === O.moveTo) {
+      cx = coords[k]; cy = coords[k + 1];
+    } else if (op === O.curveTo || op === O.curveTo2 || op === O.curveTo3) {
+      curves = true; segs++;
+      cx = coords[k + (op === O.curveTo ? 4 : 2)]; cy = coords[k + (op === O.curveTo ? 5 : 3)];
+    } else if (op === O.rectangle) {
+      segs += 4;
+    }
+    if (op !== O.rectangle && op !== O.closePath && op !== O.moveTo) onlyRects = false;
+    k += n[op] || 0;
+  }
+  // Bounds from the points themselves: pdfjs's own minMax argument changed
+  // its element order between versions.
+  const local = x0 <= x1 && y0 <= y1 ? [x0, y0, x1, y1] : null;
+  // A box drawn as four straight lines (as many tools draw rectangles) is a
+  // rectangle too: every point sits on a corner of its bounds.
+  if (!onlyRects && local && !curves && !diagonal && segs >= 3 && segs <= 5 && points.length >= 4
+    && points.every(([x, y]) => (Math.abs(x - x0) < 0.5 || Math.abs(x - x1) < 0.5) && (Math.abs(y - y0) < 0.5 || Math.abs(y - y1) < 0.5))) {
+    onlyRects = true;
+  }
+  return { segs, curves, diagonal, onlyRects, local };
+}
+
 async function readPdfLayout(pdfBuffer, opts = {}) {
-  const { maxPages, minDimension, maxImages, maxSide } = { ...DEFAULTS, ...opts };
+  const { maxPages, minDimension, maxImages, maxSide, maxDrawings } = { ...DEFAULTS, ...opts };
   const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
   const { Jimp } = require('jimp');
   const { pngBuffer } = require('./pngImage');
@@ -97,18 +149,51 @@ async function readPdfLayout(pdfBuffer, opts = {}) {
       const content = await page.getTextContent();
       const lines = itemsToLines(content.items, viewport);
       const images = [];
+      const drawings = [];
       const ops = await page.getOperatorList();
       let ctm = [1, 0, 0, 1, 0, 0];
       const stack = [];
-      for (let i = 0; i < ops.fnArray.length && imageCount < maxImages; i++) {
+      // Paths built since the last paint; kept only if they are painted
+      // (a path ended without painting is a clipping area, not a drawing).
+      let pending = [];
+      const O = pdfjs.OPS;
+      const STROKE = new Set([O.stroke, O.closeStroke]);
+      const FILL = new Set([O.fill, O.eoFill]);
+      const BOTH = new Set([O.fillStroke, O.eoFillStroke, O.closeFillStroke, O.closeEOFillStroke]);
+      const toBox = (minMax) => {
+        const [x0, y0, x1, y1] = minMax;
+        const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]].map(([u, v]) => viewport.convertToViewportPoint(
+          ctm[0] * u + ctm[2] * v + ctm[4], ctm[1] * u + ctm[3] * v + ctm[5]));
+        const xs = corners.map(c => c[0]); const ys = corners.map(c => c[1]);
+        return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+      };
+      for (let i = 0; i < ops.fnArray.length; i++) {
         const fn = ops.fnArray[i];
         const args = ops.argsArray[i];
-        if (fn === pdfjs.OPS.save) { stack.push(ctm); continue; }
-        if (fn === pdfjs.OPS.restore) { ctm = stack.pop() || ctm; continue; }
-        if (fn === pdfjs.OPS.transform) { ctm = mul(ctm, args); continue; }
-        if (fn === pdfjs.OPS.paintFormXObjectBegin) { stack.push(ctm); if (Array.isArray(args[0])) ctm = mul(ctm, args[0]); continue; }
-        if (fn === pdfjs.OPS.paintFormXObjectEnd) { ctm = stack.pop() || ctm; continue; }
-        if (fn !== pdfjs.OPS.paintImageXObject && fn !== pdfjs.OPS.paintImageXObjectRepeat) continue;
+        if (fn === O.save) { stack.push(ctm); continue; }
+        if (fn === O.restore) { ctm = stack.pop() || ctm; continue; }
+        if (fn === O.transform) { ctm = mul(ctm, args); continue; }
+        if (fn === O.paintFormXObjectBegin) { stack.push(ctm); if (Array.isArray(args[0])) ctm = mul(ctm, args[0]); continue; }
+        if (fn === O.paintFormXObjectEnd) { ctm = stack.pop() || ctm; continue; }
+        if (fn === O.constructPath) {
+          const [subOps, coords] = args || [];
+          if (Array.isArray(subOps)) {
+            const { local, ...shape } = pathShape(pdfjs, subOps, coords || []);
+            if (local) pending.push({ ...toBox(local), ...shape });
+          }
+          continue;
+        }
+        if (fn === O.endPath) { pending = []; continue; }
+        if (STROKE.has(fn) || FILL.has(fn) || BOTH.has(fn)) {
+          if (drawings.length < maxDrawings) {
+            const paint = STROKE.has(fn) ? 'stroke' : FILL.has(fn) ? 'fill' : 'both';
+            for (const d of pending) if (drawings.length < maxDrawings) drawings.push({ ...d, paint });
+          }
+          pending = [];
+          continue;
+        }
+        if (imageCount >= maxImages) continue;
+        if (fn !== O.paintImageXObject && fn !== O.paintImageXObjectRepeat) continue;
         try {
           const objId = args[0];
           const store = objId.startsWith('g_') ? page.commonObjs : page.objs;
@@ -141,7 +226,7 @@ async function readPdfLayout(pdfBuffer, opts = {}) {
           imageCount++;
         } catch { /* one bad image must not abort the rest */ }
       }
-      pages.push({ page: p, width: viewport.width, height: viewport.height, lines, images });
+      pages.push({ page: p, width: viewport.width, height: viewport.height, lines, images, drawings });
       page.cleanup();
     }
     return { numPages: doc.numPages, pages };

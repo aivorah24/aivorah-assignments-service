@@ -6,8 +6,10 @@
 //   2. A task that needs a picture but has none in its region shows the
 //      region itself, cropped from the page (vector drawings, grids, shapes
 //      drawn with Word's tools).
-//   3. A picture that only prints the task's own questions is dropped.
-//   4. Picture ids from the transcript (img://p1-3) become real URLs — or an
+//   3. A picture that only prints the task's own questions is dropped
+//      (never a diagram: its labels may be copied into the question text).
+//   4. A diagram no question uses goes to the question printed above it.
+//   5. Picture ids from the transcript (img://p1-3) become real URLs — or an
 //      inline image when hosting isn't configured, so nothing goes missing.
 const { tokensOf } = require('./documentModel');
 
@@ -85,21 +87,39 @@ function pictureTokens(labels) {
 // an image) adds nothing once those values are in the questions: showing it
 // repeats Q1–Q4 under Q1. Pictures with anything else (a conversion chart,
 // unread values) stay.
-function dropTextOnlyPictures(quiz, doc) {
+//
+// A diagram is not such a list even when the model copied all its labels
+// into a question ("Find the perimeter: 5 m, 6 m, 8 m, 3 m") - the shape is
+// still needed. So a picture counts as text-only only when its values are
+// spread over several questions, one item each, and are all values (digits),
+// not vertex letters. Diagrams drawn as shapes (vector) are never text.
+const questionText = q => `${q.question || ''} ${(q.options || []).join(' ')}`.replace(/\s+/g, '').toLowerCase();
+
+function printsOnlyQuestions(pic, qs) {
+  if (pic.vector) return false;
+  const tokens = pictureTokens(pic.labels);
+  if (tokens.length < 2 || !tokens.every(t => /\d/.test(t))) return false;
+  const texts = qs.map(questionText);
+  const hits = tokens.map(t => texts.findIndex(x => x.includes(t)));
+  if (hits.some(i => i < 0)) return false;
+  if (new Set(hits).size < 2) return false;
+  return !texts.some(x => tokens.every(t => x.includes(t)));
+}
+
+function dropTextOnlyPictures(quiz, doc, droppedIds) {
   const byId = new Map(((doc && doc.pictures) || []).map(p => [p.id, p]));
   let dropped = 0;
   for (const task of quiz.tasks || []) {
     const qs = task.questions || [];
-    const text = qs.map(q => `${q.question || ''} ${(q.options || []).join(' ')}`).join(' ').replace(/\s+/g, '').toLowerCase();
     const refs = qs.filter(q => typeof q.imageUrl === 'string' && byId.has(q.imageUrl));
     if (!refs.length) continue;
-    const textOnly = refs.every((q) => {
-      const tokens = pictureTokens(byId.get(q.imageUrl).labels);
-      return tokens.length >= 2 && tokens.every(t => text.includes(t));
-    });
+    const textOnly = refs.every(q => printsOnlyQuestions(byId.get(q.imageUrl), qs));
     if (!textOnly) continue;
     for (const q of qs) {
-      if (q.imageUrl && byId.has(q.imageUrl)) delete q.imageUrl;
+      if (q.imageUrl && byId.has(q.imageUrl)) {
+        if (droppedIds) droppedIds.add(q.imageUrl);
+        delete q.imageUrl;
+      }
       delete q.hasImage;
       delete q.visualUnderstandingRequired;
     }
@@ -108,6 +128,55 @@ function dropTextOnlyPictures(quiz, doc) {
     dropped++;
   }
   return dropped;
+}
+
+// Safety net: a diagram the model left out of every question. It belongs to
+// the question printed just above it ("3. Find the area of the rectangle."
+// then the rectangle), or to the task whose heading is just above it. Drawn
+// diagrams always count; an embedded picture only when that question says it
+// needs one. Returns the number of pictures placed.
+const ORPHAN_ROWS_ABOVE = 3;
+const MATCH_RATIO = 0.6;
+
+function matchScore(rowTokens, text) {
+  const have = new Set(tokensOf(text));
+  return rowTokens.filter(t => have.has(t)).length / rowTokens.length;
+}
+
+function attachOrphanPictures(quiz, doc, droppedIds = new Set()) {
+  const tasks = (quiz.tasks || []).filter(t => !t.picturesAsText && (t.questions || []).length);
+  const used = new Set();
+  for (const t of quiz.tasks || []) for (const q of t.questions || []) if (typeof q.imageUrl === 'string') used.add(q.imageUrl);
+  let placed = 0;
+  const orphans = (doc.pictures || []).filter(p => p.bbox && !used.has(p.id) && !droppedIds.has(p.id))
+    .sort((a, b) => a.page - b.page || a.bbox.y - b.bbox.y);
+  for (const pic of orphans) {
+    const above = (doc.anchors || [])
+      .filter(a => a.page === pic.page && a.y + a.h <= pic.bbox.y + 2)
+      .sort((a, b) => b.y - a.y)
+      .slice(0, ORPHAN_ROWS_ABOVE);
+    let target = null;
+    for (const row of above) {
+      const want = tokensOf(row.text);
+      if (want.length < 2) continue;
+      let best = null;
+      for (const task of tasks) {
+        task.questions.forEach((q) => {
+          const s = matchScore(want, q.question || '');
+          if (s >= MATCH_RATIO && (!best || s > best.s)) best = { s, task, q };
+        });
+        const s = matchScore(want, task.title || '');
+        if (s >= MATCH_RATIO && (!best || s > best.s)) best = { s, task, q: task.questions[0], shared: true };
+      }
+      if (best) { target = best; break; }
+    }
+    if (!target || target.q.imageUrl) continue;
+    if (!pic.vector && !(target.q.hasImage || target.q.visualUnderstandingRequired || target.task.sharedImage)) continue;
+    target.q.imageUrl = pic.id;
+    if (target.shared) target.task.sharedImage = true;
+    placed++;
+  }
+  return placed;
 }
 
 async function cropRegion(pageImage, pageSize, top, bottom) {
@@ -130,7 +199,9 @@ const dataUri = p => `data:${p.mime || 'image/png'};base64,${p.buffer.toString('
 async function attachRegionCrops(quiz, doc, hostImages) {
   if (!doc || !doc.anchors) return 0;
   attachRegionPictures(quiz, doc);
-  dropTextOnlyPictures(quiz, doc);
+  const droppedIds = new Set();
+  dropTextOnlyPictures(quiz, doc, droppedIds);
+  attachOrphanPictures(quiz, doc, droppedIds);
   if (!doc.pageImages || !doc.pageImages.length) return 0;
   const jobs = [];
   for (const r of taskRegions(quiz, doc)) {
@@ -172,4 +243,4 @@ function resolvePictureRefs(quiz, doc) {
   return quiz;
 }
 
-module.exports = { attachRegionCrops, attachRegionPictures, dropTextOnlyPictures, resolvePictureRefs, findAnchor, taskNeedsPicture };
+module.exports = { attachRegionCrops, attachRegionPictures, dropTextOnlyPictures, attachOrphanPictures, resolvePictureRefs, findAnchor, taskNeedsPicture };

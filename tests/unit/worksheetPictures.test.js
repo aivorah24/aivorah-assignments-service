@@ -4,7 +4,7 @@ jest.mock('../../services/supabase', () => ({ from: jest.fn() }));
 const { Jimp } = require('jimp');
 const { pairFractions, readingOrder } = require('../../services/worksheet/documentModel');
 const { findGridCells } = require('../../services/worksheet/pngImage');
-const { resolvePictureRefs, attachRegionPictures, dropTextOnlyPictures } = require('../../services/worksheet/regionCrops');
+const { resolvePictureRefs, attachRegionPictures, dropTextOnlyPictures, attachOrphanPictures } = require('../../services/worksheet/regionCrops');
 const { renderQuizHTML } = require('../../utils/quizHtmlRenderer');
 const { flagUnverifiedNumbers, buildConversionReport } = require('../../services/quizVision');
 
@@ -138,6 +138,73 @@ describe('dropTextOnlyPictures (MHLE-29: the Task 2 picture repeated Q1–Q4 und
     const task = { title: 'Task 4', questions: [{ question: '1/2 ☐ 9/9', imageUrl: 'img://p2-5' }] };
     dropTextOnlyPictures({ tasks: [task] }, doc);
     expect(task.questions[0].imageUrl).toBe('img://p2-5');
+  });
+
+  test('a diagram whose labels the model copied into its question stays (perimeter of a shape)', () => {
+    const shape = { pictures: [{ id: 'img://p1-1', labels: '5m ; 6m ; 8m ; 3m' }] };
+    const task = { title: 'Task 1', questions: [
+      { question: 'Find the perimeter: sides 5m, 6m, 8m, 3m', imageUrl: 'img://p1-1' }, { question: 'Find the area' },
+    ] };
+    expect(dropTextOnlyPictures({ tasks: [task] }, shape)).toBe(0);
+    expect(task.questions[0].imageUrl).toBe('img://p1-1');
+  });
+
+  test('a drawn diagram is never dropped, even when its values are spread over the questions', () => {
+    const drawn = { pictures: [{ id: 'img://p1-1', labels: '3 cm ; 4 cm ; 5 cm', vector: true }] };
+    const task = { title: 'Triangle', questions: [
+      { question: 'Side AB is 3 cm', imageUrl: 'img://p1-1' }, { question: 'Side BC is 4 cm' }, { question: 'Side AC is 5 cm' },
+    ] };
+    dropTextOnlyPictures({ tasks: [task] }, drawn);
+    expect(task.questions[0].imageUrl).toBe('img://p1-1');
+  });
+
+  test('vertex letters are not values: a lettered figure stays', () => {
+    const lettered = { pictures: [{ id: 'img://p1-1', labels: 'A ; B ; C' }] };
+    const task = { title: 'T', questions: [{ question: 'Name A', imageUrl: 'img://p1-1' }, { question: 'Name B' }, { question: 'Name C' }] };
+    dropTextOnlyPictures({ tasks: [task] }, lettered);
+    expect(task.questions[0].imageUrl).toBe('img://p1-1');
+  });
+});
+
+describe('attachOrphanPictures (a diagram the model left out of every question)', () => {
+  const doc = {
+    anchors: [
+      { page: 1, y: 100, h: 12, text: 'Task 1: Answer the geometry questions.' },
+      { page: 1, y: 130, h: 12, text: '1. Find the perimeter of the rectangle below.' },
+      { page: 1, y: 260, h: 12, text: '2. Measure the angle in the triangle below.' },
+      { page: 1, y: 400, h: 12, text: '3. Name a shape with four equal sides.' },
+    ],
+    pictures: [
+      { id: 'img://p1-1', page: 1, bbox: { x: 60, y: 150, w: 160, h: 90 }, labels: '8 cm ; 5 cm', vector: true },
+      { id: 'img://p1-2', page: 1, bbox: { x: 60, y: 280, w: 160, h: 100 }, labels: 'A ; B ; C', vector: true },
+      { id: 'img://p1-3', page: 1, bbox: { x: 60, y: 420, w: 60, h: 60 }, labels: '' },
+    ],
+  };
+  const quiz = () => ({ tasks: [{ title: 'Task 1: Answer the geometry questions.', questions: [
+    { question: 'Find the perimeter of the rectangle.' },
+    { question: 'Measure the angle in the triangle.' },
+    { question: 'Name a shape with four equal sides.' },
+  ] }] });
+
+  test('each drawn diagram goes to the question printed just above it', () => {
+    const q = quiz();
+    expect(attachOrphanPictures(q, doc)).toBe(2);
+    expect(q.tasks[0].questions.map(x => x.imageUrl)).toEqual(['img://p1-1', 'img://p1-2', undefined]);
+  });
+
+  test('an embedded picture goes only to a question that needs one; dropped and used pictures are left alone', () => {
+    const q = quiz();
+    q.tasks[0].questions[0].imageUrl = 'img://p1-2';
+    expect(attachOrphanPictures(q, doc, new Set(['img://p1-1']))).toBe(0);
+    q.tasks[0].questions[2].hasImage = true;
+    expect(attachOrphanPictures(q, doc, new Set(['img://p1-1']))).toBe(1);
+    expect(q.tasks[0].questions[2].imageUrl).toBe('img://p1-3');
+  });
+
+  test('a task whose pictures were turned into text gets none back', () => {
+    const q = quiz();
+    q.tasks[0].picturesAsText = true;
+    expect(attachOrphanPictures(q, doc)).toBe(0);
   });
 });
 
