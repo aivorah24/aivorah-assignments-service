@@ -230,10 +230,34 @@ describe('solution formatting and explanation questions', () => {
         expect(html).toContain('Drag each word onto its matching picture');
       });
 
+      test('a task picture set by the teacher (sharedImageUrl) is shown above; the items keep their own pictures', () => {
+        const pics = ['a', 'b', 'c', 'd'].map(n => `https://x.test/${n}.png`);
+        const html = renderQuizHTML(matchQuiz(pics, { sharedImageUrl: 'https://x.test/chart.png' }), {});
+        expect(html.match(/x\.test\/chart\.png/g)).toHaveLength(1);
+        expect(html.indexOf('class="match-shared-ref"')).toBeLessThan(html.indexOf('class="match-bank"'));
+        cards(html).forEach((card, i) => expect(card).toContain(pics[i]));
+      });
+
+      test('a picture moved from item a) to the task is not shown in card a) any more', () => {
+        const quiz = matchQuiz(['https://x.test/chart.png'], { sharedImageUrl: 'https://x.test/chart.png', sharedImage: true });
+        const html = renderQuizHTML(quiz, {});
+        expect(html.match(/x\.test\/chart\.png/g)).toHaveLength(1);
+        expect(cards(html).some(card => card.includes('<img'))).toBe(false);
+      });
+
       test('the same strip on every item is shown once above', () => {
         const html = renderQuizHTML(matchQuiz(Array(4).fill('https://x.test/strip.png')), {});
         expect(html.match(/x\.test\/strip\.png/g)).toHaveLength(1);
       });
+    });
+
+    test('a teacher-set task picture shows once above; question 1 keeps its own different picture', () => {
+      const html = renderQuizHTML({ tasks: [{ title: 'Look', sharedImageUrl: 'https://x.test/task.png', questions: [
+        { question: 'Q1', answer: 'a', imageUrl: 'https://x.test/q1.png' }, { question: 'Q2', answer: 'b' },
+      ] }] }, {});
+      expect(html.match(/x\.test\/task\.png/g)).toHaveLength(1);
+      expect(html.match(/x\.test\/q1\.png/g)).toHaveLength(1);
+      expect(html.indexOf('task.png')).toBeLessThan(html.indexOf('q1.png'));
     });
 
     test('a picture that fails to load is replaced by a note (handler defined in <head>)', () => {
