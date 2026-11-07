@@ -1227,7 +1227,7 @@ router.post('/', async (req, res) => {
         if (t.table && Array.isArray(t.table.rows) && t.table.rows.length) return true;
         if (Array.isArray(t.pyramids) && t.pyramids.length) return true;
         if (Array.isArray(t.diagramFillBlanks) && t.diagramFillBlanks.length) return true;
-        if (t._matchTask || t.sharedImage) return true;
+        if (t._matchTask || t.sharedImage || t.sharedImageUrl) return true;
         if (t.passage && String(t.passage).trim()) return true;
         return false;
       };

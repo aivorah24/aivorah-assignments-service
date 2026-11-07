@@ -318,6 +318,16 @@ function bruteForceSolveVerticalMath(top, bottom, result, op, width) {
   return solution;
 }
 
+// The task's own picture (shown once above its questions). A teacher can set
+// it explicitly in Edit (task.sharedImageUrl); generated quizzes mark it with
+// sharedImage on the task and the picture on its first question.
+function taskPictureUrl(task) {
+  if (!task) return null;
+  if (task.sharedImageUrl) return task.sharedImageUrl;
+  const q0 = (task.questions || [])[0];
+  return task.sharedImage && q0 && q0.imageUrl ? q0.imageUrl : null;
+}
+
 function normalizeMatchingTasks(quiz) {
   (quiz.tasks || []).forEach((task, ti) => {
     const qs = task.questions || [];
@@ -1068,14 +1078,16 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     // shown once above the cards and each card shows its item's text.
     // (MHLE-31: the Length/Width/Area/Perimeter chart was the shared task
     // picture; drawn inside card a) only, it looked like an answer option.)
-    const cardImgs = matchQs.map(q => q.imageUrl).filter(Boolean);
+    const sharedUrl = taskPictureUrl(task);
+    // A picture the teacher set as the task's own is never an item's picture.
+    const ownPicture = q => q.imageUrl && !(task.sharedImageUrl && q.imageUrl === task.sharedImageUrl) ? q.imageUrl : null;
+    const cardImgs = matchQs.map(ownPicture).filter(Boolean);
     const distinctImgs = new Set(cardImgs);
-    const sharedUrl = task.sharedImage && questions[0] && questions[0].imageUrl;
     let perItemPictures = distinctImgs.size >= 2 && distinctImgs.size === cardImgs.length
       && distinctImgs.size * 2 >= matchQs.length;
     // The task's shared picture is an item's own only if every other item has one too.
-    if (perItemPictures && sharedUrl && matchQs.slice(1).some(q => !q.imageUrl)) perItemPictures = false;
-    const sharedRefs = perItemPictures ? [] : [...new Set([sharedUrl, ...cardImgs].filter(Boolean))];
+    if (perItemPictures && sharedUrl && !task.sharedImageUrl && matchQs.slice(1).some(q => !q.imageUrl)) perItemPictures = false;
+    const sharedRefs = perItemPictures ? [task.sharedImageUrl].filter(Boolean) : [...new Set([sharedUrl, ...cardImgs].filter(Boolean))];
 
     let h = perItemPictures
       ? `<p style="font-size:13px;color:#A8B5B3;margin:0 0 10px;">Drag each word onto its matching picture &mdash; or tap a word, then tap a picture&rsquo;s box.</p>`
@@ -1083,7 +1095,7 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
     for (const url of sharedRefs) {
       h += `<div class="match-shared-ref" style="text-align:center;margin:0 0 14px;"><img class="wk-img" onerror="wkImgError(this)" src="${embedImage(url)}" alt="${esc(task.sharedImageDescription || 'Picture for this task')}" style="max-height:360px;"></div>`;
     }
-    if (sharedRefs.length) h += `<div style="font-size:12px;color:#A8B5B3;margin:-8px 0 12px;text-align:center;">Use the picture above to match each item.</div>`;
+    if (sharedRefs.length && !perItemPictures) h += `<div style="font-size:12px;color:#A8B5B3;margin:-8px 0 12px;text-align:center;">Use the picture above to match each item.</div>`;
     h += `<div class="match-bank" id="${bankId}">` + bankWords.map(w =>
       `<span class="match-chip" draggable="true" data-word="${esc(w)}" data-bank="${bankId}" ondragstart="mDragStart(event)" onclick="mChipClick(this)">${fmt(w)}</span>`).join('') + `</div>`;
 
@@ -1092,8 +1104,8 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       const qId = qIds[i];
       h += `<div class="match-card" id="${qId}-card">`;
       if (q.id) h += `<div class="match-card-label">${esc(q.id)})</div>`;
-      if (q.imageUrl && perItemPictures) {
-        h += `<div class="match-img"><img src="${embedImage(q.imageUrl)}" alt="${esc(q.diagramDescription || 'Picture to match')}" onerror="wkImgError(this)"></div>`;
+      if (perItemPictures && ownPicture(q)) {
+        h += `<div class="match-img"><img src="${embedImage(ownPicture(q))}" alt="${esc(q.diagramDescription || 'Picture to match')}" onerror="wkImgError(this)"></div>`;
       } else {
         // No cropped picture (or the only image is the shared strip shown above) —
         // fall back to the question text as the thing to match.
@@ -1431,12 +1443,12 @@ function renderQuizHTML(quiz, branding = {}, { apiBase = process.env.PUBLIC_URL 
       });
     } else
     // ── SHARED IMAGE: show one diagram for the entire task (all questions reference it) ──
-    if (task.sharedImage) {
+    if (task.sharedImage || task.sharedImageUrl) {
       // Only ever show a real cropped diagram (questions[0].imageUrl) — never task.pageImageUrl,
       // which is the entire scanned worksheet page (other tasks, header info, etc.). Showing the
       // whole page instead of the specific diagram is confusing and wrong for every worksheet,
       // not just this one — if no crop was extracted, fall through to the text-description path.
-      const sharedUrl = questions[0] && questions[0].imageUrl;
+      const sharedUrl = taskPictureUrl(task);
       if (sharedUrl) {
         // Shown once for the task — don't repeat it on every question that carries the same URL.
         questions.forEach(q => { if (q.imageUrl === sharedUrl) q._sharedImage = true; });
