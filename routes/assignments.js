@@ -65,6 +65,8 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const { publishJob } = require('../services/jobQueue');
 const { sendPush } = require('../services/push');
 const { isEligibleForClassAssignment } = require('../services/assignmentEligibility');
+// The only assignment columns isEligibleForClassAssignment() reads (+ id).
+const CLASS_ELIGIBILITY_COLUMNS = 'id, student_id, created_by_id, created_by_role, curriculum, grade';
 const { resolveClassRecipients } = require('../services/assignmentRecipients');
 const { assignmentAssignedEvent, assignmentFeedbackEvent, createNotificationEvent, clearNotificationsForEntity } = require('../services/notify');
 
@@ -1515,30 +1517,29 @@ router.get('/', async (req, res) => {
   const userId = await resolveUserId(studentId);
   if (!userId) return res.json([]);
 
-  // These four lookups only need userId, so they run at the same time: each
-  // Supabase round trip from Render costs ~0.25-0.6s, and running the whole
-  // chain one after another made this list take ~3s to load.
+  // Round 1 — these lookups only need userId, so they run at the same time
+  // (each Supabase round trip from Render costs ~0.25-0.6s):
   //  - the student's curriculum, grade, school, and join date (for filtering)
-  //  - all assignments for this student (personal) OR class-wide (student_id is null)
+  //  - every class-wide assignment (student_id is null), but ONLY the columns
+  //    the eligibility rule reads. Loading them with select('*') pulled the
+  //    questions/worksheet content of every class-wide assignment on the
+  //    platform (MBs) on each request; full rows are fetched below only for
+  //    this student's candidates.
   //  - which teachers this student is linked to: a teacher's "All students"
   //    assignment must only reach the students under that teacher — not every
   //    student in the curriculum+grade across the whole school
   //  - this student's submissions, so each assignment shows their own score
-  const orFilter = userId
-    ? `student_id.eq.${userId},student_id.is.null`
-    : `student_id.is.null`;
   const [
     { data: uData },
-    { data: allData, error },
+    { data: classWide, error },
     { data: tlinks },
     { data: subs },
   ] = await Promise.all([
     supabase.from('users').select('curriculum, grade, school, created_at').eq('id', userId).single(),
     supabase
       .from('assignments')
-      .select('*')
-      .or(orFilter)
-      .order('due_date', { ascending: true }),
+      .select(CLASS_ELIGIBILITY_COLUMNS)
+      .is('student_id', null),
     supabase
       .from('teacher_student')
       .select('teacher_id')
@@ -1560,27 +1561,50 @@ router.get('/', async (req, res) => {
   const studentTeacherIds = new Set();
   (tlinks || []).forEach(l => { if (l.teacher_id) studentTeacherIds.add(l.teacher_id); });
 
-  // School scoping: a class-wide assignment must not cross schools. Look up the
-  // school of each class-wide assignment's creator so we can require it to match
-  // the student's school (same curriculum but different school → not assigned).
-  const classCreatorIds = [...new Set(
-    (allData || []).filter(a => a.student_id === null && a.created_by_id).map(a => a.created_by_id)
-  )];
-  // Fetched once per request (not per assignment) so the school/curriculum logo
-  // shows on every regenerated worksheet — see normalise()'s live HTML regen.
-  // Runs alongside the creator-school lookup (neither needs the other).
-  const brandingReq = fetchBranding(studentSchool, studentCurriculum);
-  const creatorSchoolMap = {};
-  if (classCreatorIds.length > 0) {
-    const { data: creators } = await supabase.from('users').select('id, school').in('id', classCreatorIds);
-    (creators || []).forEach(c => { creatorSchoolMap[c.id] = c.school || null; });
-  }
-
   // Class-wide items go through the same rule notification fan-out uses.
+  // First pass without the creator's school (that check can only remove an
+  // item), so we know which full rows to load; the final pass below adds it.
   const student = { curriculum: studentCurriculum, grade: studentGrade, school: studentSchool };
+  const candidates = studentKnown
+    ? (classWide || []).filter(a => a.student_id === null
+        && isEligibleForClassAssignment(a, student, { studentTeacherIds, creatorSchool: null }))
+    : [];
+  const candidateIds = candidates.map(a => a.id);
+
+  // Round 2 — in parallel:
+  //  - full rows for this student's personal assignments + class-wide
+  //    candidates, still ordered by due date in the database
+  //  - school scoping: a class-wide assignment must not cross schools, so look
+  //    up the school of each candidate's creator (same curriculum but
+  //    different school → not assigned)
+  //  - branding, fetched once per request (not per assignment) so the
+  //    school/curriculum logo shows on every regenerated worksheet — see
+  //    normalise()'s live HTML regen
+  const orFilter = candidateIds.length > 0
+    ? `student_id.eq.${userId},id.in.(${candidateIds.join(',')})`
+    : `student_id.eq.${userId}`;
+  const classCreatorIds = [...new Set(candidates.map(a => a.created_by_id).filter(Boolean))];
+  const brandingReq = fetchBranding(studentSchool, studentCurriculum);
+  const [{ data: allData, error: fullError }, { data: creators }] = await Promise.all([
+    supabase
+      .from('assignments')
+      .select('*')
+      .or(orFilter)
+      .order('due_date', { ascending: true }),
+    classCreatorIds.length > 0
+      ? supabase.from('users').select('id, school').in('id', classCreatorIds)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  if (fullError) return res.status(500).json({ error: fullError.message });
+
+  const creatorSchoolMap = {};
+  (creators || []).forEach(c => { creatorSchoolMap[c.id] = c.school || null; });
+
+  const candidateIdSet = new Set(candidateIds);
   const filtered = (allData || []).filter(a => {
-    if (a.student_id !== null) return true; // personal — explicitly targeted
-    if (!studentKnown) return false;
+    if (a.student_id !== null) return a.student_id === userId; // personal — explicitly targeted
+    if (!candidateIdSet.has(a.id)) return false;
     return isEligibleForClassAssignment(a, student, {
       studentTeacherIds,
       creatorSchool: a.created_by_id ? creatorSchoolMap[a.created_by_id] : null,

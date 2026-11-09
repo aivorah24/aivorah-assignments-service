@@ -289,3 +289,84 @@ describe('GET /assignments — student list speed', () => {
     expect(res.body.find(a => a.id === 'a2').score).toBe(80);
   });
 });
+
+describe('GET /assignments — only this student\'s candidates are loaded in full', () => {
+  function chainsFor(table) {
+    return mockSb.supabase.from.mock.calls
+      .map((c, i) => (c[0] === table ? mockSb.supabase.from.mock.results[i].value : null))
+      .filter(Boolean);
+  }
+
+  test('class-wide items are first read with only the eligibility columns, then full rows only for candidates', async () => {
+    mockSb.setTable('users', [
+      { data: usersRow({ curriculum: 'IB PYP', grade: 'Grade 4' }), error: null },
+      { data: [{ id: TEACHER_UUID, school: null }], error: null },
+    ]);
+    const mine = assignmentRow({ id: 'mine', student_id: null, created_by_id: TEACHER_UUID, curriculum: 'IB PYP', grade: 'Grade 4' });
+    const otherGrade = assignmentRow({ id: 'other-grade', student_id: null, created_by_id: TEACHER_UUID, curriculum: 'IB PYP', grade: 'Grade 9' });
+    mockSb.setTable('assignments', [
+      { data: [mine, otherGrade], error: null }, // light class-wide read
+      { data: [mine], error: null },             // full rows
+    ]);
+    mockSb.setTable('teacher_student', { data: [{ teacher_id: TEACHER_UUID }], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+    mockSb.supabase.from.mockClear();
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.map(a => a.id)).toEqual(['mine']);
+    const [light, full] = chainsFor('assignments');
+    expect(light.select).toHaveBeenCalledWith('id, student_id, created_by_id, created_by_role, curriculum, grade');
+    expect(light.is).toHaveBeenCalledWith('student_id', null);
+    expect(full.select).toHaveBeenCalledWith('*');
+    const orArg = full.or.mock.calls[0][0];
+    expect(orArg).toContain(`student_id.eq.${STUDENT_UUID}`);
+    expect(orArg).toContain('id.in.(mine)');
+    expect(orArg).not.toContain('other-grade');
+  });
+
+  test('with no class-wide candidates, only the student\'s personal rows are loaded', async () => {
+    mockSb.setTable('users', { data: usersRow({ curriculum: 'CBSE', grade: 'Grade 6' }), error: null });
+    mockSb.setTable('assignments', [
+      { data: [assignmentRow({ id: 'x', student_id: null, created_by_id: TEACHER_UUID, curriculum: 'IB PYP' })], error: null },
+      { data: [assignmentRow({ id: 'p1' })], error: null },
+    ]);
+    mockSb.setTable('teacher_student', { data: [], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+    mockSb.supabase.from.mockClear();
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.body.map(a => a.id)).toEqual(['p1']);
+    const [, full] = chainsFor('assignments');
+    expect(full.or).toHaveBeenCalledWith(`student_id.eq.${STUDENT_UUID}`);
+  });
+
+  test('a candidate from a teacher at another school is still hidden', async () => {
+    mockSb.setTable('users', [
+      { data: usersRow({ curriculum: 'IB PYP', grade: 'Grade 4', school: 'TSRA' }), error: null },
+      { data: [{ id: TEACHER_UUID, school: 'Other School' }], error: null },
+    ]);
+    const cross = assignmentRow({ id: 'cross', student_id: null, created_by_id: TEACHER_UUID, curriculum: 'IB PYP', grade: 'Grade 4' });
+    mockSb.setTable('assignments', [{ data: [cross], error: null }, { data: [cross], error: null }]);
+    mockSb.setTable('teacher_student', { data: [{ teacher_id: TEACHER_UUID }], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.map(a => a.id)).not.toContain('cross');
+  });
+
+  test('an error loading the full rows is a 500, not a silently empty list', async () => {
+    mockSb.setTable('users', { data: usersRow(), error: null });
+    mockSb.setTable('assignments', [{ data: [], error: null }, { data: null, error: { message: 'db down' } }]);
+    mockSb.setTable('teacher_student', { data: [], error: null });
+    mockSb.setTable('assignment_submissions', { data: [], error: null });
+
+    const res = await request(app).get(`/assignments?studentId=${STUDENT_UUID}`);
+
+    expect(res.status).toBe(500);
+  });
+});
